@@ -66,12 +66,17 @@ EncryptType parse_enc_type(std::string_view enc_type) {
 }
 
 Builder Builder::make(
-        const network_destination& destination, const std::vector<network::service_node>& nodes) {
-    return Builder{destination, nodes};
+        const network_destination& destination,
+        const std::vector<network::service_node>& nodes,
+        const EncryptType enc_type_) {
+    return Builder{destination, nodes, enc_type_};
 }
 
 Builder::Builder(
-        const network_destination& destination, const std::vector<network::service_node>& nodes) :
+        const network_destination& destination,
+        const std::vector<network::service_node>& nodes,
+        const EncryptType enc_type_) :
+        enc_type{enc_type_},
         destination_x25519_public_key{detail::pubkey_for_destination(destination)} {
     set_destination(destination);
     for (auto& n : nodes)

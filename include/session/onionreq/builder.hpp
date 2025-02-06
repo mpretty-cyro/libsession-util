@@ -67,12 +67,14 @@ inline constexpr std::string_view to_string(EncryptType type) {
 // Builder class for preparing onion request payloads.
 class Builder {
     Builder(const network_destination& destination,
-            const std::vector<network::service_node>& nodes);
+            const std::vector<network::service_node>& nodes,
+            const EncryptType enc_type_);
 
   public:
     static Builder make(
             const network_destination& destination,
-            const std::vector<network::service_node>& nodes);
+            const std::vector<network::service_node>& nodes,
+            const EncryptType enc_type_ = EncryptType::xchacha20);
 
     EncryptType enc_type;
     std::optional<x25519_pubkey> destination_x25519_public_key = std::nullopt;
