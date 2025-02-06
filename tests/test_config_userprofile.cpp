@@ -13,14 +13,6 @@
 using namespace std::literals;
 using namespace oxenc::literals;
 
-void log_msg(config_log_level lvl, const char* msg, void*) {
-    INFO((lvl == LOG_LEVEL_ERROR     ? "ERROR"
-          : lvl == LOG_LEVEL_WARNING ? "Warning"
-          : lvl == LOG_LEVEL_INFO    ? "Info"
-                                     : "debug")
-         << ": " << msg);
-}
-
 auto empty_extra_data = "1:+de";
 
 TEST_CASE("UserProfile", "[config][user_profile]") {

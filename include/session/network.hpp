@@ -122,6 +122,8 @@ struct onion_path {
 
     std::string to_string() const;
 
+    bool contains_node(const service_node& sn) const;
+
     bool operator==(const onion_path& other) const {
         // The `conn_info` and failure/timeout counts can be reset for a path in a number
         // of situations so just use the nodes to determine if the paths match
