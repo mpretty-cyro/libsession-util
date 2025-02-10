@@ -14,7 +14,7 @@ CSRNG csrng = CSRNG{};
 
 namespace session::random {
 
-constexpr char base32_charset[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ01234567";
+constexpr char base32_charset[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 ustring random(size_t size) {
     ustring result;
@@ -25,14 +25,13 @@ ustring random(size_t size) {
 }
 
 std::string random_base32(size_t size) {
-    std::string charset = base32_charset;
     std::string result;
+    result.reserve(size);
+    auto n_chars = sizeof(base32_charset) - 1;
 
-    for (size_t i = 0; i < size; ++i) {
-        std::shuffle(charset.begin(), charset.end(), csrng);
-        result.push_back(charset[0]);
-    }
-
+    for (size_t i = 0; i < size; ++i)
+        result.push_back(base32_charset[csrng() % n_chars]);
+    
     return result;
 }
 
