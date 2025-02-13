@@ -22,6 +22,9 @@ local default_test_deps = libngtcp2_deps;
 
 local docker_base = 'registry.oxen.rocks/';
 
+// cmake options for static deps mirror
+local ci_dep_mirror(want_mirror) = (if want_mirror then ' -DLOCAL_MIRROR=https://oxen.rocks/deps ' else '');
+
 local debian_backports(distro, pkgs) = [
   'echo "deb http://deb.debian.org/debian ' + distro + '-backports main" >/etc/apt/sources.list.d/' + distro + '-backports.list',
   'eatmydata ' + apt_get_quiet + ' update',
@@ -90,6 +93,7 @@ local debian_build(name,
                    lto=false,
                    werror=true,
                    cmake_extra='',
+                   local_mirror=true,
                    shared_libs=true,
                    jobs=6,
                    tests=true,
@@ -113,7 +117,8 @@ local debian_build(name,
     (if shared_libs then '-DBUILD_SHARED_LIBS=ON ' else '') +
     '-DUSE_LTO=' + (if lto then 'ON ' else 'OFF ') +
     '-DWITH_TESTS=' + (if tests then 'ON ' else 'OFF ') +
-    cmake_extra,
+    cmake_extra +
+    ci_dep_mirror(local_mirror),
     'make VERBOSE=1 -j' + jobs,
   ],
   extra_setup=extra_setup,
@@ -150,6 +155,7 @@ local windows_cross_pipeline(name,
                              lto=false,
                              werror=false,
                              cmake_extra='',
+                             local_mirror=true,
                              jobs=6,
                              tests=true,
                              winarch='x86-64',
@@ -171,7 +177,8 @@ local windows_cross_pipeline(name,
     '-DUSE_LTO=' + (if lto then 'ON ' else 'OFF ') +
     '-DWITH_TESTS=' + (if tests then 'ON ' else 'OFF ') +
     '-DCMAKE_TOOLCHAIN_FILE=../cmake/mingw-' + winarch + '-toolchain.cmake ' +
-    cmake_extra,
+    cmake_extra +
+    ci_dep_mirror(local_mirror),
     'make VERBOSE=1 -j' + jobs,
   ],
   extra_steps=(if tests then
@@ -194,8 +201,7 @@ local clang(version) = debian_build(
   docker_base + 'debian-sid-clang',
   deps=['clang-' + version] + default_deps_nocxx,
   cmake_extra='-DCMAKE_C_COMPILER=clang-' + version +
-              ' -DCMAKE_CXX_COMPILER=clang++-' + version +
-              ' -DLOCAL_MIRROR="https://oxen.rocks/deps" '
+              ' -DCMAKE_CXX_COMPILER=clang++-' + version
 );
 
 local full_llvm(version) = debian_build(
@@ -207,7 +213,6 @@ local full_llvm(version) = debian_build(
   cmake_extra='-DCMAKE_C_COMPILER=clang-' + version +
               ' -DCMAKE_CXX_COMPILER=clang++-' + version +
               ' -DCMAKE_CXX_FLAGS="-stdlib=libc++ -fcolor-diagnostics" ' +
-              ' -DLOCAL_MIRROR="https://oxen.rocks/deps" ' +
               std.join(' ', [
                 '-DCMAKE_' + type + '_LINKER_FLAGS=-fuse-ld=lld-' + version
                 for type in ['EXE', 'MODULE', 'SHARED']
@@ -245,6 +250,7 @@ local mac_builder(name,
                   werror=true,
                   lto=false,
                   cmake_extra='',
+                  local_mirror=true,
                   jobs=6,
                   tests=true,
                   allow_fail=false)
@@ -256,7 +262,8 @@ local mac_builder(name,
   '-DBUILD_SHARED_LIBS=ON ' +
   '-DUSE_LTO=' + (if lto then 'ON ' else 'OFF ') +
   '-DWITH_TESTS=' + (if tests then 'ON ' else 'OFF ') +
-  cmake_extra,
+  cmake_extra +
+  ci_dep_mirror(local_mirror),
   'VERBOSE=1 make -j' + jobs,
 ], extra_steps=
                      (if tests then
@@ -279,6 +286,7 @@ local static_build(name,
                    oxen_repo=false,
                    kitware_repo=''/* ubuntu codename, if wanted */,
                    cmake_extra='',
+                   local_mirror=true,
                    allow_fail=false,
                    jobs=6)
       = debian_pipeline(
@@ -290,7 +298,7 @@ local static_build(name,
   allow_fail=allow_fail,
   build=[
     'export JOBS=' + jobs,
-    './utils/static-bundle.sh build ' + archive_name + ' -DSTATIC_LIBSTD=ON ' + cmake_extra,
+    './utils/static-bundle.sh build ' + archive_name + ' -DSTATIC_LIBSTD=ON ' + cmake_extra + ci_dep_mirror(local_mirror),
     'cd build && ../utils/ci/drone-static-upload.sh',
   ]
 );
