@@ -107,7 +107,8 @@ for i in "${!TARGET_ARCHS[@]}"; do
         -DPLATFORM=$platform \
         -DDEPLOYMENT_TARGET=$IPHONEOS_DEPLOYMENT_TARGET \
         -DENABLE_BITCODE=$ENABLE_BITCODE \
-        -DENABLE_ONIONREQ=OFF  # Temporary until we figure out why ios builds hate gmp
+        -DENABLE_ONIONREQ=OFF \
+        -DLOCAL_MIRROR=https://oxen.rocks/deps
 done
 
 # If needed combine simulator builds into a multi-arch lib
