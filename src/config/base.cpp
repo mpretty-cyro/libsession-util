@@ -270,11 +270,6 @@ std::vector<std::string> ConfigBase::_merge(
             set_state(ConfigState::Clean);
             _curr_hash = all_hashes[*_config->unmerged_index()];
         }
-    } else {
-        // The for loop above can end up adding our _curr_hash into _old_hashes if given the
-        // *current* active config to merge a second time, so make sure we didn't do so by cleaning
-        // _curr_hash out of _old_hashes just in case:
-        _old_hashes.erase(_curr_hash);
     }
 
     std::vector<std::string> good_hashes;
