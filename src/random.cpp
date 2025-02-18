@@ -31,7 +31,7 @@ std::string random_base32(size_t size) {
 
     for (size_t i = 0; i < size; ++i)
         result.push_back(base32_charset[csrng() % n_chars]);
-    
+
     return result;
 }
 
