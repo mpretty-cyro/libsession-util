@@ -56,12 +56,12 @@ TEST_CASE("Logging callbacks", "[logging]") {
     }
 
     log::critical(log::Cat("test.a"), "abc {}", 21 * 2);
-#if defined(__APPLE__) && defined(__clang__) && TARGET_CPU_X86_64
+#if defined(__APPLE__) && defined(__clang__) && (__clang_major__ <= 15)
 #else
     int line0 = __LINE__ - 3;
 #endif
     log::info(log::Cat("test.b"), "hi");
-#if defined(__APPLE__) && defined(__clang__) && TARGET_CPU_X86_64
+#if defined(__APPLE__) && defined(__clang__) && (__clang_major__ <= 15)
 #else
     int line1 = __LINE__ - 3;
 #endif
@@ -71,7 +71,7 @@ TEST_CASE("Logging callbacks", "[logging]") {
     REQUIRE(simple_logs.size() == 2);
     REQUIRE(full_logs.size() == 2);
 
-#if defined(__APPLE__) && defined(__clang__) && TARGET_CPU_X86_64
+#if defined(__APPLE__) && defined(__clang__) && (__clang_major__ <= 15)
     CHECK(fixup_log(simple_logs[0]) ==
           "[<timestamp>] [<reltime>] [test.a:critical|log.hpp:177] abc 42\n");
     CHECK(fixup_log(simple_logs[1]) == "[<timestamp>] [<reltime>] [test.b:info|log.hpp:98] hi\n");
