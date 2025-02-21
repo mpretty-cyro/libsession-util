@@ -83,32 +83,32 @@ void Info::set_expiry_timer(std::chrono::seconds expiration_timer) {
 }
 
 void Info::set_created(int64_t timestamp) {
-    set_positive_int(data["c"], to_seconds(timestamp));
+    set_positive_int(data["c"], to_epoch_seconds(timestamp));
 }
 
 std::optional<int64_t> Info::get_created() const {
     if (auto* ts = data["c"].integer())
-        return to_seconds(*ts);
+        return to_epoch_seconds(*ts);
     return std::nullopt;
 }
 
 void Info::set_delete_before(int64_t timestamp) {
-    set_positive_int(data["d"], to_seconds(timestamp));
+    set_positive_int(data["d"], to_epoch_seconds(timestamp));
 }
 
 std::optional<int64_t> Info::get_delete_before() const {
     if (auto* ts = data["d"].integer())
-        return to_seconds(*ts);
+        return to_epoch_seconds(*ts);
     return std::nullopt;
 }
 
 void Info::set_delete_attach_before(int64_t timestamp) {
-    set_positive_int(data["D"], to_seconds(timestamp));
+    set_positive_int(data["D"], to_epoch_seconds(timestamp));
 }
 
 std::optional<int64_t> Info::get_delete_attach_before() const {
     if (auto* ts = data["D"].integer())
-        return to_seconds(*ts);
+        return to_epoch_seconds(*ts);
     return std::nullopt;
 }
 

@@ -203,7 +203,7 @@ inline std::string utf8_truncate(std::string val, size_t n) {
 
 // Helper function to transform a timestamp provided in seconds, milliseconds or microseconds to
 // seconds
-inline int64_t to_seconds(int64_t timestamp) {
+inline int64_t to_epoch_seconds(int64_t timestamp) {
     return timestamp > 9'000'000'000'000 ? timestamp / 1'000'000
          : timestamp > 9'000'000'000     ? timestamp / 1'000
                                          : timestamp;
