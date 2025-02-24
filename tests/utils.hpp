@@ -35,14 +35,14 @@ inline constexpr auto operator""_kiB(unsigned long long kiB) {
 }
 
 // Returns the current timestamp in milliseconds
-inline uint64_t get_timestamp_ms() {
+inline int64_t get_timestamp_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::system_clock::now().time_since_epoch())
             .count();
 }
 
 // Returns the current timestamp in seconds
-inline uint64_t get_timestamp_s() {
+inline int64_t get_timestamp_s() {
     return std::chrono::duration_cast<std::chrono::seconds>(
                    std::chrono::system_clock::now().time_since_epoch())
             .count();
@@ -50,7 +50,7 @@ inline uint64_t get_timestamp_s() {
 }
 
 // Returns the current timestamp in microseconds
-inline uint64_t get_timestamp_us() {
+inline int64_t get_timestamp_us() {
     return std::chrono::duration_cast<std::chrono::microseconds>(
                    std::chrono::system_clock::now().time_since_epoch())
             .count();

@@ -839,8 +839,8 @@ TEST_CASE("User groups mute_until & joined_at are always seconds", "[config][gro
     {
         auto lg = c.get_or_construct_legacy_group(
                 "051234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
-        auto joined_at = get_timestamp_us();
-        auto mute_until = get_timestamp_s();
+        int64_t joined_at = get_timestamp_us();
+        int64_t mute_until = get_timestamp_s();
         lg.joined_at = joined_at;
         lg.mute_until = mute_until;
         c.set(lg);
@@ -854,8 +854,8 @@ TEST_CASE("User groups mute_until & joined_at are always seconds", "[config][gro
     {
         auto gr = c.get_or_construct_group(
                 "031234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
-        auto joined_at = get_timestamp_ms();
-        auto mute_until = get_timestamp_us();
+        int64_t joined_at = get_timestamp_ms();
+        int64_t mute_until = get_timestamp_us();
         gr.joined_at = joined_at;
         gr.mute_until = mute_until;
         c.set(gr);
@@ -872,8 +872,8 @@ TEST_CASE("User groups mute_until & joined_at are always seconds", "[config][gro
         const auto url = "http://example.org:5678";
         const auto room = "sudoku_room";
         auto comm = c.get_or_construct_community(url, room, open_group_pubkey);
-        auto joined_at = get_timestamp_ms();
-        auto mute_until = get_timestamp_ms();
+        int64_t joined_at = get_timestamp_ms();
+        int64_t mute_until = get_timestamp_ms();
         comm.joined_at = joined_at;
         comm.mute_until = mute_until;
         c.set(comm);
