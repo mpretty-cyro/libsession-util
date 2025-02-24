@@ -91,7 +91,7 @@ namespace {
 
     constexpr auto node_not_found_prefix = "502 Bad Gateway\n\nNext node not found: "sv;
     constexpr auto node_not_found_prefix_no_status = "Next node not found: "sv;
-    constexpr auto ALPN = "oxenstorage"sv;
+    constexpr auto ALPN = "oxenstorage";
     constexpr auto ONION = "onion_req";
 
     enum class PathSelectionBehaviour {
@@ -253,7 +253,7 @@ namespace {
                 node.swarm_id);
     }
 
-    session::onionreq::x25519_pubkey compute_xpk(ustring_view ed25519_pk) {
+    session::onionreq::x25519_pubkey compute_xpk(uspan ed25519_pk) {
         std::array<unsigned char, 32> xpk;
         if (0 != crypto_sign_ed25519_pk_to_curve25519(xpk.data(), ed25519_pk.data()))
             throw std::runtime_error{
@@ -450,14 +450,14 @@ namespace detail {
 
 request_info request_info::make(
         onionreq::network_destination _dest,
-        std::optional<ustring> _original_body,
+        std::optional<quic::bspan> _original_body,
         std::optional<session::onionreq::x25519_pubkey> _swarm_pk,
         std::chrono::milliseconds _request_timeout,
         std::optional<std::chrono::milliseconds> _request_and_path_build_timeout,
         PathType _type,
         std::optional<std::string> _req_id,
         std::optional<std::string> _ep,
-        std::optional<ustring> _body) {
+        std::optional<quic::bspan> _body) {
     return request_info{
             _req_id.value_or("R-{}"_format(random::random_base32(4))),
             std::move(_dest),
@@ -1236,7 +1236,7 @@ void Network::refresh_snode_cache(std::optional<std::string> existing_request_id
     };
     auto info = request_info::make(
             target_node,
-            ustring{quic::to_usv(payload.dump())},
+            quic::str_to_bspan(payload.dump()),
             std::nullopt,
             quic::DEFAULT_TIMEOUT,
             std::nullopt,
@@ -1776,10 +1776,10 @@ void Network::send_request(
         return handle_response(
                 false, false, -1, {content_type_plain_text}, "Network is unreachable.");
 
-    quic::bstring_view payload{};
+    quic::bspan payload{};
 
     if (info.body)
-        payload = convert_sv<std::byte>(*info.body);
+        payload = *info.body;
 
     // Calculate the remaining timeout
     std::chrono::milliseconds timeout = info.request_timeout;
@@ -1846,7 +1846,7 @@ void Network::send_request(
 
 void Network::send_onion_request(
         onionreq::network_destination destination,
-        std::optional<ustring> body,
+        std::optional<quic::bspan> body,
         std::optional<session::onionreq::x25519_pubkey> swarm_pubkey,
         network_response_callback_t handle_response,
         std::chrono::milliseconds request_timeout,
@@ -2059,7 +2059,7 @@ void Network::_send_onion_request(request_info info, network_response_callback_t
 }
 
 void Network::upload_file_to_server(
-        ustring data,
+        quic::bspan data,
         onionreq::ServerDestination server,
         std::optional<std::string> file_name,
         network_response_callback_t handle_response,
@@ -2148,11 +2148,11 @@ void Network::get_client_version(
     }
 
     // Generate the auth signature
-    auto blinded_keys = blind_version_key_pair(to_unsigned_sv(seckey.view()));
+    auto blinded_keys = blind_version_key_pair(span_to_span<unsigned char>(seckey.view()));
     auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(
                              (std::chrono::system_clock::now()).time_since_epoch())
                              .count();
-    auto signature = blind_version_sign(to_unsigned_sv(seckey.view()), platform, timestamp);
+    auto signature = blind_version_sign(span_to_span<unsigned char>(seckey.view()), platform, timestamp);
     auto pubkey = x25519_pubkey::from_hex(file_server_pubkey);
     std::string blinded_pk_hex;
     blinded_pk_hex.reserve(66);

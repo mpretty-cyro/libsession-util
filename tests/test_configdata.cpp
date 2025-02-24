@@ -108,15 +108,11 @@ auto& s(config::dict_value& v) {
 }
 
 template <typename T, size_t N>
-ustring_view view(const std::array<T, N>& data) {
-    return ustring_view{data.data(), data.size()};
-}
-template <typename T, size_t N>
 std::string view_hex(const std::array<T, N>& data) {
     return oxenc::to_hex(data.begin(), data.end());
 }
 
-ustring blake2b(ustring_view data) {
+ustring blake2b(uspan data) {
     ustring result;
     result.resize(32);
     crypto_generichash_blake2b(result.data(), 32, data.data(), data.size(), nullptr, 0);
@@ -339,14 +335,14 @@ TEST_CASE("config message signature", "[config][signing]") {
             "4384261cdd338f5820ca9cbbe3fc72ac8944ee60d3b795b797fbbf5597b09f17"sv;
     std::array<unsigned char, 64> secretkey;
     oxenc::from_hex(skey_hex.begin(), skey_hex.end(), secretkey.begin());
-    auto signer = [&secretkey](ustring_view data) {
+    auto signer = [&secretkey](uspan data) {
         ustring result;
         result.resize(64);
         crypto_sign_ed25519_detached(
                 result.data(), nullptr, data.data(), data.size(), secretkey.data());
         return result;
     };
-    auto verifier = [&secretkey](ustring_view data, ustring_view signature) {
+    auto verifier = [&secretkey](uspan data, uspan signature) {
         return 0 == crypto_sign_verify_detached(
                             signature.data(), data.data(), data.size(), secretkey.data() + 32);
     };

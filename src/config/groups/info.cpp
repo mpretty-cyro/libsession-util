@@ -17,9 +17,9 @@ using namespace std::literals;
 namespace session::config::groups {
 
 Info::Info(
-        ustring_view ed25519_pubkey,
-        std::optional<ustring_view> ed25519_secretkey,
-        std::optional<ustring_view> dumped) :
+        uspan ed25519_pubkey,
+        std::optional<uspan> ed25519_secretkey,
+        std::optional<uspan> dumped) :
         ConfigBase{dumped, ed25519_pubkey, ed25519_secretkey},
         id{"03" + oxenc::to_hex(ed25519_pubkey.begin(), ed25519_pubkey.end())} {}
 
@@ -64,7 +64,7 @@ profile_pic Info::get_profile_pic() const {
     return pic;
 }
 
-void Info::set_profile_pic(std::string_view url, ustring_view key) {
+void Info::set_profile_pic(std::string_view url, uspan key) {
     set_pair_if(!url.empty() && key.size() == 32, data["p"], url, data["q"], key);
 }
 
@@ -254,7 +254,7 @@ LIBSESSION_C_API user_profile_pic groups_info_get_pic(const config_object* conf)
 /// - `int` -- Returns 0 on success, non-zero on error
 LIBSESSION_C_API int groups_info_set_pic(config_object* conf, user_profile_pic pic) {
     std::string_view url{pic.url};
-    ustring_view key;
+    uspan key;
     if (!url.empty())
         key = {pic.key, 32};
 

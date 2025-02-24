@@ -23,7 +23,7 @@ community::community(std::string_view base_url_, std::string_view room_) {
     set_room(std::move(room_));
 }
 
-community::community(std::string_view base_url, std::string_view room, ustring_view pubkey_) :
+community::community(std::string_view base_url, std::string_view room, uspan pubkey_) :
         community{base_url, room} {
     set_pubkey(pubkey_);
 }
@@ -45,7 +45,7 @@ void community::set_base_url(std::string_view new_url) {
     base_url_ = canonical_url(new_url);
 }
 
-void community::set_pubkey(ustring_view pubkey) {
+void community::set_pubkey(uspan pubkey) {
     if (pubkey.size() != 32)
         throw std::invalid_argument{"Invalid pubkey: expected a 32-byte pubkey"};
     pubkey_ = pubkey;
@@ -79,7 +79,7 @@ std::string community::full_url() const {
 }
 
 std::string community::full_url(
-        std::string_view base_url, std::string_view room, ustring_view pubkey) {
+        std::string_view base_url, std::string_view room, uspan pubkey) {
     std::string url{base_url};
     url += '/';
     url += room;
@@ -214,7 +214,7 @@ LIBSESSION_C_API bool community_parse_partial_url(
 LIBSESSION_C_API void community_make_full_url(
         const char* base_url, const char* room, const unsigned char* pubkey, char* full_url) {
     auto full =
-            session::config::community::full_url(base_url, room, session::ustring_view{pubkey, 32});
+            session::config::community::full_url(base_url, room, session::uspan{pubkey, 32});
     assert(full.size() <= COMMUNITY_FULL_URL_MAX_LENGTH);
     std::memcpy(full_url, full.data(), full.size() + 1);
 }

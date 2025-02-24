@@ -13,9 +13,6 @@
 
 #include "session/config/base.h"
 
-using ustring = std::basic_string<unsigned char>;
-using ustring_view = std::basic_string_view<unsigned char>;
-
 inline ustring operator""_bytes(const char* x, size_t n) {
     return {reinterpret_cast<const unsigned char*>(x), n};
 }
@@ -25,7 +22,7 @@ inline ustring operator""_hexbytes(const char* x, size_t n) {
     return bytes;
 }
 
-inline std::string to_hex(ustring_view bytes) {
+inline std::string to_hex(uspan bytes) {
     std::string hex;
     oxenc::to_hex(bytes.begin(), bytes.end(), std::back_inserter(hex));
     return hex;
@@ -41,18 +38,18 @@ inline int64_t get_timestamp_ms() {
             .count();
 }
 
-inline std::string_view to_sv(ustring_view x) {
+inline std::string_view to_sv(uspan x) {
     return {reinterpret_cast<const char*>(x.data()), x.size()};
 }
-inline ustring_view to_usv(std::string_view x) {
+inline uspan to_usv(std::string_view x) {
     return {reinterpret_cast<const unsigned char*>(x.data()), x.size()};
 }
 template <size_t N>
-ustring_view to_usv(const std::array<unsigned char, N>& data) {
+uspan to_usv(const std::array<unsigned char, N>& data) {
     return {data.data(), N};
 }
 
-inline std::string printable(ustring_view x) {
+inline std::string printable(uspan x) {
     std::string p;
     for (auto c : x) {
         if (c >= 0x20 && c <= 0x7e)

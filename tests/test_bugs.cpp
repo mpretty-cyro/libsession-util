@@ -24,14 +24,14 @@ TEST_CASE("Dirty/Mutable test case", "[config][dirty]") {
     CHECK(oxenc::to_hex(seed.begin(), seed.end()) ==
           oxenc::to_hex(ed_sk.begin(), ed_sk.begin() + 32));
 
-    session::config::Contacts c1{ustring_view{seed}, std::nullopt};
+    session::config::Contacts c1{uspan{seed}, std::nullopt};
     c1.set_name("050000000000000000000000000000000000000000000000000000000000000000", "alfonso");
     auto [seqno, data, obsolete] = c1.push();
     CHECK(obsolete == std::vector<std::string>{});
     c1.confirm_pushed(seqno, "fakehash1");
 
-    session::config::Contacts c2{ustring_view{seed}, c1.dump()};
-    session::config::Contacts c3{ustring_view{seed}, c1.dump()};
+    session::config::Contacts c2{uspan{seed}, c1.dump()};
+    session::config::Contacts c3{uspan{seed}, c1.dump()};
 
     CHECK_FALSE(c2.needs_dump());
     CHECK_FALSE(c2.needs_push());
@@ -50,7 +50,7 @@ TEST_CASE("Dirty/Mutable test case", "[config][dirty]") {
     REQUIRE(seqno3 == 2);
     CHECK(obs2 == std::vector{"fakehash1"s});
 
-    auto r = c1.merge(std::vector<std::pair<std::string, ustring_view>>{
+    auto r = c1.merge(std::vector<std::pair<std::string, uspan>>{
             {{"fakehash2", data2}, {"fakehash3", data3}}});
     CHECK(r == std::vector{{"fakehash2"s, "fakehash3"s}});
     CHECK(c1.needs_dump());

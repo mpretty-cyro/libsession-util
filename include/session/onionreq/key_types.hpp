@@ -21,27 +21,27 @@ namespace detail {
     template <size_t Length>
     inline constexpr std::array<unsigned char, Length> null_bytes = {0};
 
-    void load_from_hex(void* buffer, size_t length, std::string_view hex);
-    void load_from_bytes(void* buffer, size_t length, std::string_view bytes);
+    void load_from_hex(void* buffer, size_t length, cspan hex);
+    void load_from_bytes(void* buffer, size_t length, bspan bytes);
 
 }  // namespace detail
 
 template <typename Derived, size_t KeyLength>
 struct alignas(size_t) key_base : std::array<unsigned char, KeyLength> {
-    std::string_view view() const {
+    cspan view() const {
         return {reinterpret_cast<const char*>(this->data()), KeyLength};
     }
     std::string hex() const { return oxenc::to_hex(view()); }
     explicit operator bool() const { return *this != detail::null_bytes<KeyLength>; }
 
     // Loads the key from a hex string; throws if the hex is the wrong size or not hex.
-    static Derived from_hex(std::string_view hex) {
+    static Derived from_hex(cspan hex) {
         Derived d;
         detail::load_from_hex(d.data(), d.size(), hex);
         return d;
     }
     // Same as above, but returns nullopt if invalid instead of throwing
-    static std::optional<Derived> maybe_from_hex(std::string_view hex) {
+    static std::optional<Derived> maybe_from_hex(cspan hex) {
         try {
             return from_hex(hex);
         } catch (...) {
@@ -49,12 +49,13 @@ struct alignas(size_t) key_base : std::array<unsigned char, KeyLength> {
         return std::nullopt;
     }
     // Loads the key from a byte string; throws if the wrong size.
-    static Derived from_bytes(std::string_view bytes) {
+    static Derived from_bytes(bspan bytes) {
         Derived d;
         detail::load_from_bytes(d.data(), d.size(), bytes);
         return d;
     }
-    static Derived from_bytes(ustring_view bytes) { return from_bytes(from_unsigned_sv(bytes)); }
+    static Derived from_bytes(cspan bytes) { return from_bytes(span_to_span<std::byte>(bytes)); }
+    static Derived from_bytes(uspan bytes) { return from_bytes(span_to_span<std::byte>(bytes)); }
 };
 
 template <typename Derived, size_t KeyLength>
@@ -92,7 +93,7 @@ using x25519_keypair = std::pair<x25519_pubkey, x25519_seckey>;
 legacy_pubkey parse_legacy_pubkey(std::string_view pubkey_in);
 ed25519_pubkey parse_ed25519_pubkey(std::string_view pubkey_in);
 x25519_pubkey parse_x25519_pubkey(std::string_view pubkey_in);
-x25519_pubkey compute_x25519_pubkey(ustring_view ed25519_pk);
+x25519_pubkey compute_x25519_pubkey(uspan ed25519_pk);
 
 }  // namespace session::onionreq
 

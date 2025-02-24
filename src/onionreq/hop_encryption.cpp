@@ -138,7 +138,7 @@ ustring HopEncryption::encrypt_aesgcm(ustring plaintext, const x25519_pubkey& pu
 }
 
 ustring HopEncryption::decrypt_aesgcm(ustring ciphertext_, const x25519_pubkey& pubKey) const {
-    ustring_view ciphertext = {ciphertext_.data(), ciphertext_.size()};
+    uspan ciphertext = {ciphertext_.data(), ciphertext_.size()};
 
     if (!response_long_enough(EncryptType::aes_gcm, ciphertext_.size()))
         throw std::invalid_argument{
@@ -203,7 +203,7 @@ ustring HopEncryption::encrypt_xchacha20(ustring plaintext, const x25519_pubkey&
 }
 
 ustring HopEncryption::decrypt_xchacha20(ustring ciphertext_, const x25519_pubkey& pubKey) const {
-    ustring_view ciphertext = {ciphertext_.data(), ciphertext_.size()};
+    uspan ciphertext = {ciphertext_.data(), ciphertext_.size()};
 
     // Extract nonce from the beginning of the ciphertext:
     auto nonce = ciphertext.substr(0, crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);

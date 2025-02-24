@@ -14,7 +14,7 @@ using namespace oxenc::literals;
 using x_pair = std::pair<std::array<unsigned char, 32>, std::array<unsigned char, 32>>;
 
 // Returns X25519 privkey, pubkey from an Ed25519 seed
-x_pair to_x_keys(ustring_view ed_seed) {
+x_pair to_x_keys(uspan ed_seed) {
     std::array<unsigned char, 32> ed_pk;
     std::array<unsigned char, 64> ed_sk;
     crypto_sign_ed25519_seed_keypair(ed_pk.data(), ed_sk.data(), ed_seed.data());
@@ -52,7 +52,7 @@ TEST_CASE("Multi-recipient encryption", "[encrypt][multi]") {
 
     auto nonce = "32ab4bb45d6df5cc14e1c330fb1a8b68ea3826a8c2213a49"_hexbytes;
 
-    std::vector<ustring_view> recipients;
+    std::vector<uspan> recipients;
     for (auto& [_, pubkey] : x_keys)
         recipients.emplace_back(pubkey.data(), pubkey.size());
 
@@ -65,7 +65,7 @@ TEST_CASE("Multi-recipient encryption", "[encrypt][multi]") {
             to_usv(x_keys[0].first),
             to_usv(x_keys[0].second),
             "test suite",
-            [&](ustring_view enc) { encrypted.emplace_back(enc); });
+            [&](uspan enc) { encrypted.emplace_back(enc); });
 
     REQUIRE(encrypted.size() == 3);
     CHECK(oxenc::to_hex(encrypted[0]) == "e64937e5ea201b84f4e88a976dad900d91caaf6a17");
@@ -126,7 +126,7 @@ TEST_CASE("Multi-recipient encryption", "[encrypt][multi]") {
             to_usv(x_keys[0].first),
             to_usv(x_keys[0].second),
             "test suite",
-            [&](ustring_view enc) { encrypted.emplace_back(enc); });
+            [&](uspan enc) { encrypted.emplace_back(enc); });
 
     REQUIRE(encrypted.size() == 3);
     CHECK(oxenc::to_hex(encrypted[0]) == "e64937e5ea201b84f4e88a976dad900d91caaf6a17");
@@ -187,7 +187,7 @@ TEST_CASE("Multi-recipient encryption", "[encrypt][multi]") {
             to_usv(x_keys[0].first),
             to_usv(x_keys[0].second),
             "test suite",
-            [&](ustring_view enc) { encrypted.emplace_back(enc); }));
+            [&](uspan enc) { encrypted.emplace_back(enc); }));
 }
 
 TEST_CASE("Multi-recipient encryption, simpler interface", "[encrypt][multi][simple]") {
@@ -216,7 +216,7 @@ TEST_CASE("Multi-recipient encryption, simpler interface", "[encrypt][multi][sim
 
     auto nonce = "32ab4bb45d6df5cc14e1c330fb1a8b68ea3826a8c2213a49"_hexbytes;
 
-    std::vector<ustring_view> recipients;
+    std::vector<uspan> recipients;
     for (auto& [_, pubkey] : x_keys)
         recipients.emplace_back(pubkey.data(), pubkey.size());
 

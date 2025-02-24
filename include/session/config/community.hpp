@@ -27,7 +27,7 @@ struct community {
 
     // Constructs an empty community struct from url, room, and pubkey.  `base_url` will be
     // normalized if not already.  pubkey is 32 bytes.
-    community(std::string_view base_url, std::string_view room, ustring_view pubkey);
+    community(std::string_view base_url, std::string_view room, uspan pubkey);
 
     // Same as above, but takes pubkey as an encoded (hex or base32z or base64) string.
     community(std::string_view base_url, std::string_view room, std::string_view pubkey_encoded);
@@ -89,13 +89,13 @@ struct community {
     ///
     /// Declaration:
     /// ```cpp
-    /// void set_pubkey(ustring_view pubkey);
+    /// void set_pubkey(uspan pubkey);
     /// void set_pubkey(std::string_view pubkey);
     /// ```
     ///
     /// Inputs:
     /// - `pubkey` -- Pubkey to be stored
-    void set_pubkey(ustring_view pubkey);
+    void set_pubkey(uspan pubkey);
     void set_pubkey(std::string_view pubkey);
 
     /// API: community/community::base_url
@@ -137,8 +137,8 @@ struct community {
     /// Inputs: None
     ///
     /// Outputs:
-    /// - `const ustring&` -- Returns the pubkey
-    const ustring& pubkey() const { return pubkey_; }
+    /// - `const std::vector<unsigned char>&` -- Returns the pubkey
+    const std::vector<unsigned char>& pubkey() const { return pubkey_; }
 
     /// API: community/community::pubkey_hex
     ///
@@ -180,7 +180,7 @@ struct community {
     /// - `std::string` -- Returns the Full URL
     std::string full_url() const;
 
-    /// API: community/community::full_url(std::string_view,std::string_view,ustring_view)
+    /// API: community/community::full_url(std::string_view,std::string_view,uspan)
     ///
     /// Constructs and returns the full URL for a given base, room, and pubkey.  Currently this
     /// returns it in a Session-compatibility form (https://server.com/RoomName?public_key=....),
@@ -195,7 +195,7 @@ struct community {
     /// Outputs:
     /// - `std::string` -- Returns the Full URL
     static std::string full_url(
-            std::string_view base_url, std::string_view room, ustring_view pubkey);
+            std::string_view base_url, std::string_view room, uspan pubkey);
 
     /// API: community/community::canonical_url
     ///
@@ -263,8 +263,8 @@ struct community {
     /// - `std::tuple` -- Tuple of 3 components of the url
     ///     - `std::string` -- canonical url, normalized
     ///     - `std::string` -- room name, *not* normalized
-    ///     - `ustring` -- binary of the server pubkey
-    static std::tuple<std::string, std::string, ustring> parse_full_url(std::string_view full_url);
+    ///     - `std::vector<unsigned char>` -- binary of the server pubkey
+    static std::tuple<std::string, std::string, std::vector<unsigned char>> parse_full_url(std::string_view full_url);
 
     /// API: community/community::parse_partial_url
     ///
@@ -278,8 +278,8 @@ struct community {
     /// - `std::tuple` -- Tuple of 3 components of the url
     ///     - `std::string` -- canonical url, normalized
     ///     - `std::string` -- room name, *not* normalized
-    ///     - `std::optional<ustring>` -- optional binary of the server pubkey if present
-    static std::tuple<std::string, std::string, std::optional<ustring>> parse_partial_url(
+    ///     - `std::optional<std::vector<unsigned char>>` -- optional binary of the server pubkey if present
+    static std::tuple<std::string, std::string, std::optional<std::vector<unsigned char>>> parse_partial_url(
             std::string_view url);
 
   protected:
@@ -289,7 +289,7 @@ struct community {
     // `someroom` and this could `SomeRoom`).  Omitted if not available.
     std::optional<std::string> localized_room_;
     // server pubkey
-    ustring pubkey_;
+    std::vector<unsigned char> pubkey_;
 
     // Construction without a pubkey for when pubkey isn't known yet but will be set shortly
     // after constructing (or when isn't needed, such as when deleting).
@@ -341,8 +341,7 @@ struct comm_iterator_helper {
                 continue;
             }
 
-            ustring_view pubkey{
-                    reinterpret_cast<const unsigned char*>(pubkey_raw->data()), pubkey_raw->size()};
+            uspan pubkey = str_to_uspan(*pubkey_raw);
 
             if (!it_room) {
                 if (auto rit = server_info_dict->find("R");

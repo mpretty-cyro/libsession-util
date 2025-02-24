@@ -9,7 +9,7 @@
 namespace session::onionreq {
 
 OnionReqParser::OnionReqParser(
-        ustring_view x25519_pk, ustring_view x25519_sk, ustring_view req, size_t max_size) :
+        uspan x25519_pk, uspan x25519_sk, uspan req, size_t max_size) :
         keys{x25519_pubkey::from_bytes(x25519_pk), x25519_seckey::from_bytes(x25519_sk)},
         enc{keys.second, keys.first} {
     if (sodium_init() == -1)
@@ -40,7 +40,7 @@ OnionReqParser::OnionReqParser(
     payload_ = {to_unsigned(plaintext.data()), plaintext.size()};
 }
 
-ustring OnionReqParser::encrypt_reply(ustring_view reply) const {
+ustring OnionReqParser::encrypt_reply(uspan reply) const {
     return enc.encrypt(enc_type, {reply.data(), reply.size()}, remote_pk);
 }
 

@@ -96,7 +96,7 @@ TEST_CASE("User Groups", "[config][groups]") {
     CHECK(oxenc::to_hex(seed.begin(), seed.end()) ==
           oxenc::to_hex(ed_sk.begin(), ed_sk.begin() + 32));
 
-    session::config::UserGroups groups{ustring_view{seed}, std::nullopt};
+    session::config::UserGroups groups{uspan{seed}, std::nullopt};
 
     constexpr auto definitely_real_id =
             "055000000000000000000000000000000000000000000000000000000000000000"sv;
@@ -440,7 +440,7 @@ TEST_CASE("User Groups -- (non-legacy) groups", "[config][groups][new]") {
     CHECK(oxenc::to_hex(seed.begin(), seed.end()) ==
           oxenc::to_hex(ed_sk.begin(), ed_sk.begin() + 32));
 
-    session::config::UserGroups groups{ustring_view{seed}, std::nullopt};
+    session::config::UserGroups groups{uspan{seed}, std::nullopt};
 
     constexpr auto definitely_real_id =
             "035000000000000000000000000000000000000000000000000000000000000000"sv;
@@ -476,7 +476,7 @@ TEST_CASE("User Groups -- (non-legacy) groups", "[config][groups][new]") {
 
     auto d1 = groups.dump();
 
-    session::config::UserGroups g2{ustring_view{seed}, d1};
+    session::config::UserGroups g2{uspan{seed}, d1};
 
     auto c2 = g2.get_group(definitely_real_id);
     REQUIRE(c2.has_value());
@@ -713,10 +713,10 @@ TEST_CASE("User Groups members C API", "[config][groups][c]") {
     REQUIRE(keys);
     REQUIRE(key_len == 1);
 
-    session::config::UserGroups c2{ustring_view{seed}, std::nullopt};
+    session::config::UserGroups c2{uspan{seed}, std::nullopt};
 
-    std::vector<std::pair<std::string, ustring_view>> to_merge;
-    to_merge.emplace_back("fakehash1", ustring_view{to_push->config, to_push->config_len});
+    std::vector<std::pair<std::string, uspan>> to_merge;
+    to_merge.emplace_back("fakehash1", uspan{to_push->config, to_push->config_len});
     CHECK(c2.merge(to_merge) == std::vector<std::string>{{"fakehash1"}});
 
     auto grp = c2.get_legacy_group(definitely_real_id);
@@ -741,7 +741,7 @@ TEST_CASE("User groups empty member bug", "[config][groups][bug]") {
     CHECK(oxenc::to_hex(seed.begin(), seed.end()) ==
           oxenc::to_hex(ed_sk.begin(), ed_sk.begin() + 32));
 
-    session::config::UserGroups c{ustring_view{seed}, std::nullopt};
+    session::config::UserGroups c{uspan{seed}, std::nullopt};
 
     CHECK_FALSE(c.needs_push());
 

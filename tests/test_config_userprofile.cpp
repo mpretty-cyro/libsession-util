@@ -32,7 +32,7 @@ TEST_CASE("UserProfile", "[config][user_profile]") {
     CHECK(oxenc::to_hex(seed.begin(), seed.end()) ==
           oxenc::to_hex(ed_sk.begin(), ed_sk.begin() + 32));
 
-    session::config::UserProfile profile{ustring_view{seed}, std::nullopt};
+    session::config::UserProfile profile{uspan{seed}, std::nullopt};
 
     CHECK_THROWS(
             profile.set_name("123456789012345678901234567890123456789012345678901234567890123456789"
@@ -141,7 +141,7 @@ TEST_CASE("user profile C API", "[config][user_profile][c]") {
     REQUIRE(pic.url != ""s);
     REQUIRE(pic.key != to_usv(""s));
     CHECK(pic.url == "http://example.org/omg-pic-123.bmp"sv);
-    CHECK(ustring_view{pic.key, 32} == "secret78901234567890123456789012"_bytes);
+    CHECK(uspan{pic.key, 32} == "secret78901234567890123456789012"_bytes);
 
     CHECK(user_profile_get_nts_priority(conf) == 9);
 
@@ -368,7 +368,7 @@ TEST_CASE("user profile C API", "[config][user_profile][c]") {
 #else
     REQUIRE(pic.key != nullptr);
 #endif
-    CHECK(to_hex(ustring_view{pic.key, 32}) ==
+    CHECK(to_hex(uspan{pic.key, 32}) ==
           "7177657274007975696f31323334353637383930313233343536373839303132");
     pic = user_profile_get_pic(conf2);
 #if defined(__APPLE__) || defined(__clang__) || defined(__llvm__)
@@ -382,7 +382,7 @@ TEST_CASE("user profile C API", "[config][user_profile][c]") {
 #else
     REQUIRE(pic.key != nullptr);
 #endif
-    CHECK(to_hex(ustring_view{pic.key, 32}) ==
+    CHECK(to_hex(uspan{pic.key, 32}) ==
           "7177657274007975696f31323334353637383930313233343536373839303132");
 
     CHECK(user_profile_get_nts_priority(conf) == 9);

@@ -11,7 +11,7 @@ std::pair<std::array<unsigned char, 32>, std::array<unsigned char, 64>> ed25519_
 
 /// Given an Ed25519 seed this returns the associated Ed25519 key pair
 std::pair<std::array<unsigned char, 32>, std::array<unsigned char, 64>> ed25519_key_pair(
-        ustring_view ed25519_seed);
+        uspan ed25519_seed);
 
 /// API: ed25519/seed_for_ed_privkey
 ///
@@ -25,7 +25,7 @@ std::pair<std::array<unsigned char, 32>, std::array<unsigned char, 64>> ed25519_
 ///
 /// Outputs:
 /// - The ed25519 seed
-std::array<unsigned char, 32> seed_for_ed_privkey(ustring_view ed25519_privkey);
+std::array<unsigned char, 32> seed_for_ed_privkey(uspan ed25519_privkey);
 
 /// API: ed25519/sign
 ///
@@ -37,7 +37,7 @@ std::array<unsigned char, 32> seed_for_ed_privkey(ustring_view ed25519_privkey);
 ///
 /// Outputs:
 /// - The ed25519 signature
-ustring sign(ustring_view ed25519_privkey, ustring_view msg);
+std::vector<unsigned char> sign(uspan ed25519_privkey, uspan msg);
 
 /// API: ed25519/verify
 ///
@@ -50,6 +50,6 @@ ustring sign(ustring_view ed25519_privkey, ustring_view msg);
 ///
 /// Outputs:
 /// - A flag indicating whether the signature is valid
-bool verify(ustring_view sig, ustring_view pubkey, ustring_view msg);
+bool verify(uspan sig, uspan pubkey, uspan msg);
 
 }  // namespace session::ed25519

@@ -52,7 +52,7 @@ namespace detail {
     }
 
     void encrypt_multi_impl(
-            ustring& out, ustring_view msg, const unsigned char* key, const unsigned char* nonce) {
+            ustring& out, uspan msg, const unsigned char* key, const unsigned char* nonce) {
 
         //        auto key = encrypt_multi_key(a, A, B, true, domain);
 
@@ -65,7 +65,7 @@ namespace detail {
 
     bool decrypt_multi_impl(
             ustring& out,
-            ustring_view ciphertext,
+            uspan ciphertext,
             const unsigned char* key,
             const unsigned char* nonce) {
 
@@ -86,7 +86,7 @@ namespace detail {
     }
 
     std::pair<sodium_cleared<std::array<unsigned char, 32>>, std::array<unsigned char, 32>> x_keys(
-            ustring_view ed25519_secret_key) {
+            uspan ed25519_secret_key) {
         if (ed25519_secret_key.size() != 64)
             throw std::invalid_argument{"Ed25519 secret key is not the expected 64 bytes"};
 
@@ -103,16 +103,16 @@ namespace detail {
 }  // namespace detail
 
 std::optional<ustring> decrypt_for_multiple(
-        const std::vector<ustring_view>& ciphertexts,
-        ustring_view nonce,
-        ustring_view privkey,
-        ustring_view pubkey,
-        ustring_view sender_pubkey,
+        const std::vector<uspan>& ciphertexts,
+        uspan nonce,
+        uspan privkey,
+        uspan pubkey,
+        uspan sender_pubkey,
         std::string_view domain) {
 
     auto it = ciphertexts.begin();
     return decrypt_for_multiple(
-            [&]() -> std::optional<ustring_view> {
+            [&]() -> std::optional<uspan> {
                 if (it == ciphertexts.end())
                     return std::nullopt;
                 return *it++;
@@ -125,12 +125,12 @@ std::optional<ustring> decrypt_for_multiple(
 }
 
 ustring encrypt_for_multiple_simple(
-        const std::vector<ustring_view>& messages,
-        const std::vector<ustring_view>& recipients,
-        ustring_view privkey,
-        ustring_view pubkey,
+        const std::vector<uspan>& messages,
+        const std::vector<uspan>& recipients,
+        uspan privkey,
+        uspan pubkey,
         std::string_view domain,
-        std::optional<ustring_view> nonce,
+        std::optional<uspan> nonce,
         int pad) {
 
     oxenc::bt_dict_producer d;
@@ -149,7 +149,7 @@ ustring encrypt_for_multiple_simple(
 
         int msg_count = 0;
         encrypt_for_multiple(
-                messages, recipients, *nonce, privkey, pubkey, domain, [&](ustring_view encrypted) {
+                messages, recipients, *nonce, privkey, pubkey, domain, [&](uspan encrypted) {
                     enc_list.append(encrypted);
                     msg_count++;
                 });
@@ -168,11 +168,11 @@ ustring encrypt_for_multiple_simple(
 }
 
 ustring encrypt_for_multiple_simple(
-        const std::vector<ustring_view>& messages,
-        const std::vector<ustring_view>& recipients,
-        ustring_view ed25519_secret_key,
+        const std::vector<uspan>& messages,
+        const std::vector<uspan>& recipients,
+        uspan ed25519_secret_key,
         std::string_view domain,
-        ustring_view nonce,
+        uspan nonce,
         int pad) {
 
     auto [x_privkey, x_pubkey] = detail::x_keys(ed25519_secret_key);
@@ -182,23 +182,23 @@ ustring encrypt_for_multiple_simple(
 }
 
 std::optional<ustring> decrypt_for_multiple_simple(
-        ustring_view encoded,
-        ustring_view privkey,
-        ustring_view pubkey,
-        ustring_view sender_pubkey,
+        uspan encoded,
+        uspan privkey,
+        uspan pubkey,
+        uspan sender_pubkey,
         std::string_view domain) {
     try {
         oxenc::bt_dict_consumer d{encoded};
-        auto nonce = d.require<ustring_view>("#");
+        auto nonce = d.require<uspan>("#");
         if (nonce.size() != 24)
             return std::nullopt;
         auto enc_list = d.require<oxenc::bt_list_consumer>("e");
 
         return decrypt_for_multiple(
-                [&]() -> std::optional<ustring_view> {
+                [&]() -> std::optional<uspan> {
                     if (enc_list.is_finished())
                         return std::nullopt;
-                    return enc_list.consume<ustring_view>();
+                    return enc_list.consume<uspan>();
                 },
                 nonce,
                 privkey,
@@ -211,9 +211,9 @@ std::optional<ustring> decrypt_for_multiple_simple(
 }
 
 std::optional<ustring> decrypt_for_multiple_simple(
-        ustring_view encoded,
-        ustring_view ed25519_secret_key,
-        ustring_view sender_pubkey,
+        uspan encoded,
+        uspan ed25519_secret_key,
+        uspan sender_pubkey,
         std::string_view domain) {
 
     auto [x_privkey, x_pubkey] = detail::x_keys(ed25519_secret_key);
@@ -223,9 +223,9 @@ std::optional<ustring> decrypt_for_multiple_simple(
 }
 
 std::optional<ustring> decrypt_for_multiple_simple_ed25519(
-        ustring_view encoded,
-        ustring_view ed25519_secret_key,
-        ustring_view sender_ed25519_pubkey,
+        uspan encoded,
+        uspan ed25519_secret_key,
+        uspan sender_ed25519_pubkey,
         std::string_view domain) {
 
     std::array<unsigned char, 32> sender_pub;
@@ -241,7 +241,7 @@ std::optional<ustring> decrypt_for_multiple_simple_ed25519(
 
 using namespace session;
 
-static unsigned char* to_c_buffer(ustring_view x, size_t* out_len) {
+static unsigned char* to_c_buffer(uspan x, size_t* out_len) {
     auto* ret = static_cast<unsigned char*>(malloc(x.size()));
     *out_len = x.size();
     std::memcpy(ret, x.data(), x.size());
@@ -261,14 +261,14 @@ LIBSESSION_C_API unsigned char* session_encrypt_for_multiple_simple(
         const unsigned char* nonce,
         int pad) {
 
-    std::vector<ustring_view> msgs, recips;
+    std::vector<uspan> msgs, recips;
     msgs.reserve(n_messages);
     recips.reserve(n_recipients);
     for (size_t i = 0; i < n_messages; i++)
         msgs.emplace_back(messages[i], message_lengths[i]);
     for (size_t i = 0; i < n_recipients; i++)
         recips.emplace_back(recipients[i], 32);
-    std::optional<ustring_view> maybe_nonce;
+    std::optional<uspan> maybe_nonce;
     if (nonce)
         maybe_nonce.emplace(nonce, 24);
 
@@ -276,8 +276,8 @@ LIBSESSION_C_API unsigned char* session_encrypt_for_multiple_simple(
         auto encoded = session::encrypt_for_multiple_simple(
                 msgs,
                 recips,
-                ustring_view{x25519_privkey, 32},
-                ustring_view{x25519_pubkey, 32},
+                uspan{x25519_privkey, 32},
+                uspan{x25519_pubkey, 32},
                 domain,
                 std::move(maybe_nonce),
                 pad);
@@ -300,7 +300,7 @@ LIBSESSION_C_API unsigned char* session_encrypt_for_multiple_simple_ed25519(
         int pad) {
 
     try {
-        auto [priv, pub] = session::detail::x_keys(ustring_view{ed25519_secret_key, 64});
+        auto [priv, pub] = session::detail::x_keys(uspan{ed25519_secret_key, 64});
         return session_encrypt_for_multiple_simple(
                 out_len,
                 messages,
@@ -329,10 +329,10 @@ LIBSESSION_C_API unsigned char* session_decrypt_for_multiple_simple(
 
     try {
         if (auto decrypted = session::decrypt_for_multiple_simple(
-                    ustring_view{encoded, encoded_len},
-                    ustring_view{x25519_privkey, 32},
-                    ustring_view{x25519_pubkey, 32},
-                    ustring_view{sender_x25519_pubkey, 32},
+                    uspan{encoded, encoded_len},
+                    uspan{x25519_privkey, 32},
+                    uspan{x25519_pubkey, 32},
+                    uspan{sender_x25519_pubkey, 32},
                     domain)) {
             return to_c_buffer(*decrypted, out_len);
         }
@@ -352,9 +352,9 @@ LIBSESSION_C_API unsigned char* session_decrypt_for_multiple_simple_ed25519_from
 
     try {
         if (auto decrypted = session::decrypt_for_multiple_simple(
-                    ustring_view{encoded, encoded_len},
-                    ustring_view{ed25519_secret, 64},
-                    ustring_view{sender_x25519_pubkey, 32},
+                    uspan{encoded, encoded_len},
+                    uspan{ed25519_secret, 64},
+                    uspan{sender_x25519_pubkey, 32},
                     domain)) {
             return to_c_buffer(*decrypted, out_len);
         }
@@ -374,9 +374,9 @@ LIBSESSION_C_API unsigned char* session_decrypt_for_multiple_simple_ed25519(
 
     try {
         if (auto decrypted = session::decrypt_for_multiple_simple_ed25519(
-                    ustring_view{encoded, encoded_len},
-                    ustring_view{ed25519_secret, 64},
-                    ustring_view{sender_ed25519_pubkey, 32},
+                    uspan{encoded, encoded_len},
+                    uspan{ed25519_secret, 64},
+                    uspan{sender_ed25519_pubkey, 32},
                     domain)) {
             return to_c_buffer(*decrypted, out_len);
         }

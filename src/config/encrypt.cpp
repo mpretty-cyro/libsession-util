@@ -13,25 +13,12 @@ using namespace std::literals;
 
 namespace session::config {
 
-namespace {
-
-    // Helper function to go from char pointers to the unsigned char pointers sodium needs:
-    const unsigned char* to_unsigned(const char* x) {
-        return reinterpret_cast<const unsigned char*>(x);
-    }
-
-    ustring_view to_unsigned_sv(std::string_view v) {
-        return {to_unsigned(v.data()), v.size()};
-    }
-
-}  // namespace
-
 static constexpr size_t DOMAIN_MAX_SIZE = 24;
 static constexpr auto NONCE_KEY_PREFIX = "libsessionutil-config-encrypted-"sv;
 static_assert(NONCE_KEY_PREFIX.size() + DOMAIN_MAX_SIZE < crypto_generichash_blake2b_KEYBYTES_MAX);
 
 static std::array<unsigned char, crypto_aead_xchacha20poly1305_ietf_KEYBYTES> make_encrypt_key(
-        ustring_view key_base, uint64_t message_size, std::string_view domain) {
+        uspan key_base, uint64_t message_size, std::string_view domain) {
     if (key_base.size() != 32)
         throw std::invalid_argument{"encrypt called with key_base != 32 bytes"};
     if (domain.size() < 1 || domain.size() > DOMAIN_MAX_SIZE)
@@ -54,7 +41,7 @@ static std::array<unsigned char, crypto_aead_xchacha20poly1305_ietf_KEYBYTES> ma
     return key;
 }
 
-ustring encrypt(ustring_view message, ustring_view key_base, std::string_view domain) {
+ustring encrypt(uspan message, uspan key_base, std::string_view domain) {
     ustring msg;
     msg.reserve(
             message.size() + crypto_aead_xchacha20poly1305_ietf_ABYTES +
@@ -63,7 +50,7 @@ ustring encrypt(ustring_view message, ustring_view key_base, std::string_view do
     encrypt_inplace(msg, key_base, domain);
     return msg;
 }
-void encrypt_inplace(ustring& message, ustring_view key_base, std::string_view domain) {
+void encrypt_inplace(ustring& message, uspan key_base, std::string_view domain) {
     auto key = make_encrypt_key(key_base, message.size(), domain);
 
     std::string nonce_key{NONCE_KEY_PREFIX};
@@ -103,18 +90,18 @@ static_assert(
         ENCRYPT_DATA_OVERHEAD ==
         crypto_aead_xchacha20poly1305_IETF_ABYTES + crypto_aead_xchacha20poly1305_IETF_NPUBBYTES);
 
-ustring decrypt(ustring_view ciphertext, ustring_view key_base, std::string_view domain) {
+ustring decrypt(uspan ciphertext, uspan key_base, std::string_view domain) {
     ustring x{ciphertext};
     decrypt_inplace(x, key_base, domain);
     return x;
 }
-void decrypt_inplace(ustring& ciphertext, ustring_view key_base, std::string_view domain) {
+void decrypt_inplace(ustring& ciphertext, uspan key_base, std::string_view domain) {
     size_t message_len = ciphertext.size() - crypto_aead_xchacha20poly1305_ietf_ABYTES -
                          crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
     if (message_len > ciphertext.size())  // overflow
         throw decrypt_error{"Decryption failed: ciphertext is too short"};
 
-    ustring_view nonce = ustring_view{ciphertext}.substr(
+    uspan nonce = uspan{ciphertext}.substr(
             ciphertext.size() - crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
     auto key = make_encrypt_key(key_base, message_len, domain);
 

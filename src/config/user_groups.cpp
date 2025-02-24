@@ -20,7 +20,6 @@
 #include "session/util.hpp"
 
 using namespace std::literals;
-using session::ustring_view;
 
 LIBSESSION_C_API const size_t GROUP_NAME_MAX_LENGTH =
         session::config::legacy_group_info::NAME_MAX_LENGTH;
@@ -60,7 +59,7 @@ legacy_group_info::legacy_group_info(std::string sid) : session_id{std::move(sid
 }
 
 community_info::community_info(const ugroups_community_info& c) :
-        community_info{c.base_url, c.room, ustring_view{c.pubkey, 32}} {
+        community_info{c.base_url, c.room, uspan{c.pubkey, 32}} {
     base_from(*this, c);
 }
 
@@ -284,19 +283,19 @@ void community_info::load(const dict& info_dict) {
         set_room(std::move(*n));
 }
 
-UserGroups::UserGroups(ustring_view ed25519_secretkey, std::optional<ustring_view> dumped) :
+UserGroups::UserGroups(uspan ed25519_secretkey, std::optional<uspan> dumped) :
         ConfigBase{dumped} {
     load_key(ed25519_secretkey);
 }
 
 ConfigBase::DictFieldProxy UserGroups::community_field(
-        const community_info& og, ustring_view* get_pubkey) const {
+        const community_info& og, uspan* get_pubkey) const {
     auto record = data["o"][og.base_url()];
     if (get_pubkey) {
         auto pkrec = record["#"];
         if (auto pk = pkrec.string_view_or(""); pk.size() == 32)
             *get_pubkey =
-                    ustring_view{reinterpret_cast<const unsigned char*>(pk.data()), pk.size()};
+                    uspan{reinterpret_cast<const unsigned char*>(pk.data()), pk.size()};
     }
     return record["R"][og.room_norm()];
 }
@@ -305,7 +304,7 @@ std::optional<community_info> UserGroups::get_community(
         std::string_view base_url, std::string_view room) const {
     community_info og{base_url, room};
 
-    ustring_view pubkey;
+    uspan pubkey;
     if (auto* info_dict = community_field(og, &pubkey).dict()) {
         og.load(*info_dict);
         if (!pubkey.empty())
@@ -321,7 +320,7 @@ std::optional<community_info> UserGroups::get_community(std::string_view partial
 }
 
 community_info UserGroups::get_or_construct_community(
-        std::string_view base_url, std::string_view room, ustring_view pubkey) const {
+        std::string_view base_url, std::string_view room, uspan pubkey) const {
     community_info result{base_url, room, pubkey};
 
     if (auto* info_dict = community_field(result).dict())
@@ -447,13 +446,13 @@ void UserGroups::set(const group_info& g) {
 
     if (g.secretkey.size() == 64 &&
         // Make sure the secretkey's embedded pubkey matches the group id:
-        ustring_view{g.secretkey.data() + 32, 32} ==
-                ustring_view{
+        uspan{g.secretkey.data() + 32, 32} ==
+                uspan{
                         reinterpret_cast<const unsigned char*>(pk_bytes.data() + 1),
                         pk_bytes.size() - 1})
-        info["K"] = ustring_view{g.secretkey.data(), 32};
+        info["K"] = uspan{g.secretkey.data(), 32};
     else {
-        info["K"] = ustring_view{};
+        info["K"] = uspan{};
         if (g.auth_data.size() == 100)
             info["s"] = g.auth_data;
         else
@@ -668,7 +667,7 @@ LIBSESSION_C_API bool user_groups_get_or_construct_community(
             conf,
             [&] {
                 unbox<UserGroups>(conf)
-                        ->get_or_construct_community(base_url, room, ustring_view{pubkey, 32})
+                        ->get_or_construct_community(base_url, room, uspan{pubkey, 32})
                         .into(*comm);
                 return true;
             },

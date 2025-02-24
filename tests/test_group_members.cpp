@@ -101,7 +101,7 @@ TEST_CASE("Group Members", "[config][groups][members]") {
     CHECK(gmem1.needs_dump());
     CHECK_FALSE(gmem1.needs_push());
 
-    std::vector<std::pair<std::string, ustring_view>> merge_configs;
+    std::vector<std::pair<std::string, uspan>> merge_configs;
     merge_configs.emplace_back("fakehash1", p1);
     CHECK(gmem2.merge(merge_configs) == std::vector<std::string>{{"fakehash1"}});
     CHECK_FALSE(gmem2.needs_push());

@@ -31,7 +31,6 @@
 
 using namespace std::literals;
 using namespace oxen::log::literals;
-using session::ustring_view;
 
 namespace session::onionreq {
 
@@ -49,8 +48,8 @@ namespace detail {
 
 namespace {
 
-    ustring encode_size(uint32_t s) {
-        ustring result;
+    std::vector<unsigned char> encode_size(uint32_t s) {
+        std::vector<unsigned char> result;
         result.resize(4);
         oxenc::write_host_as_little(s, result.data());
         return result;
@@ -83,7 +82,7 @@ Builder::Builder(
         add_hop(n.view_remote_key());
 }
 
-void Builder::add_hop(ustring_view remote_key) {
+void Builder::add_hop(uspan remote_key) {
     hops_.push_back({ed25519_pubkey::from_bytes(remote_key), compute_x25519_pubkey(remote_key)});
 }
 
@@ -122,11 +121,11 @@ void Builder::generate(network::request_info& info) {
     info.body = build(_generate_payload(info.original_body));
 }
 
-ustring Builder::_generate_payload(std::optional<ustring> body) const {
+uspan Builder::_generate_payload(std::optional<uspan> body) const {
     // If we don't have the data required for a server request, then assume it's targeting a
     // service node and, therefore, the `body` is the payload
     if (!host_ || !endpoint_ || !protocol_ || !method_ || !destination_x25519_public_key)
-        return body.value_or(ustring{});
+        return body.value_or(uspan{});
 
     // Otherwise generate the payload for a server request
     auto headers_json = nlohmann::json::object();
@@ -144,18 +143,18 @@ ustring Builder::_generate_payload(std::optional<ustring> body) const {
     // Structure the request information
     nlohmann::json request_info{
             {"method", *method_}, {"endpoint", *endpoint_}, {"headers", headers_json}};
-    std::vector<std::string> payload{request_info.dump()};
+    std::vector<uspan> payload{str_to_uspan(request_info.dump())};
 
     // If we were given a body, add it to the payload
     if (body.has_value())
-        payload.emplace_back(from_unsigned_sv(*body));
+        payload.emplace_back(*body);
 
     auto result = oxenc::bt_serialize(payload);
-    return {to_unsigned(result.data()), result.size()};
+    return str_to_uspan(result);
 }
 
-ustring Builder::build(ustring payload) {
-    ustring blob;
+bspan Builder::build(uspan payload) {
+    std::vector<unsigned char> blob;
 
     // First hop:
     //
@@ -229,7 +228,7 @@ ustring Builder::build(ustring payload) {
 
             auto data = encode_size(payload.size());
             data += payload;
-            data += to_unsigned_sv(control.dump());
+            data += str_to_uspan(control.dump());
             blob = e.encrypt(enc_type, data, *destination_x25519_public_key);
         } else {
             if (!destination_x25519_public_key.has_value())
@@ -275,7 +274,7 @@ ustring Builder::build(ustring payload) {
     // how to decrypt the initial payload:
     auto result = encode_size(blob.size());
     result += blob;
-    result += to_unsigned_sv(
+    result += str_to_bspan(
             nlohmann::json{{"ephemeral_key", A.hex()}, {"enc_type", to_string(enc_type)}}.dump());
 
     return result;
@@ -392,7 +391,7 @@ LIBSESSION_C_API bool onion_request_builder_build(
 
     try {
         auto& unboxed_builder = unbox(builder);
-        auto payload = unboxed_builder.build(ustring{payload_in, payload_in_len});
+        auto payload = unboxed_builder.build(uspan{payload_in, payload_in_len});
 
         if (unboxed_builder.final_hop_x25519_keypair) {
             auto key_pair = unboxed_builder.final_hop_x25519_keypair.value();

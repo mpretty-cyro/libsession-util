@@ -10,11 +10,10 @@
 #include "session/types.hpp"
 
 using namespace session::config;
-using session::ustring_view;
 
 LIBSESSION_C_API const size_t PROFILE_PIC_MAX_URL_LENGTH = profile_pic::MAX_URL_LENGTH;
 
-UserProfile::UserProfile(ustring_view ed25519_secretkey, std::optional<ustring_view> dumped) :
+UserProfile::UserProfile(uspan ed25519_secretkey, std::optional<uspan> dumped) :
         ConfigBase{dumped} {
     load_key(ed25519_secretkey);
 }
@@ -77,7 +76,7 @@ LIBSESSION_C_API user_profile_pic user_profile_get_pic(const config_object* conf
     return p;
 }
 
-void UserProfile::set_profile_pic(std::string_view url, ustring_view key) {
+void UserProfile::set_profile_pic(std::string_view url, uspan key) {
     set_pair_if(!url.empty() && key.size() == 32, data["p"], url, data["q"], key);
 }
 
@@ -87,7 +86,7 @@ void UserProfile::set_profile_pic(profile_pic pic) {
 
 LIBSESSION_C_API int user_profile_set_pic(config_object* conf, user_profile_pic pic) {
     std::string_view url{pic.url};
-    ustring_view key;
+    uspan key;
     if (!url.empty())
         key = {pic.key, 32};
 

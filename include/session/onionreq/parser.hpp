@@ -15,33 +15,25 @@ class OnionReqParser {
     HopEncryption enc;
     EncryptType enc_type = EncryptType::aes_gcm;
     x25519_pubkey remote_pk;
-    ustring payload_;
+    uspan payload_;
 
   public:
     /// Constructs a parser, parsing the given request sent to us.  Throws if parsing or decryption
     /// fails.
     OnionReqParser(
-            ustring_view x25519_pubkey,
-            ustring_view x25519_privkey,
-            ustring_view req,
+            uspan x25519_pubkey,
+            uspan x25519_privkey,
+            uspan req,
             size_t max_size = DEFAULT_MAX_SIZE);
 
     /// plaintext payload, decrypted from the incoming request during construction.
-    ustring_view payload() const { return payload_; }
+    uspan payload() const { return payload_; }
 
-    /// Extracts payload from this object (via a std::move); after the call the object's payload
-    /// will be empty.
-    ustring move_payload() {
-        ustring ret{std::move(payload_)};
-        payload_.clear();  // Guarantee empty, even if SSO active
-        return ret;
-    }
-
-    ustring_view remote_pubkey() const { return to_unsigned_sv(remote_pk.view()); }
+    uspan remote_pubkey() const { return span_to_span<unsigned char>(remote_pk.view()); }
 
     /// Encrypts a reply using the appropriate encryption as determined when parsing the
     /// request.
-    ustring encrypt_reply(ustring_view reply) const;
+    uspan encrypt_reply(uspan reply) const;
 };
 
 }  // namespace session::onionreq

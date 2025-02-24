@@ -7,7 +7,7 @@
 #include "session/xed25519.h"
 #include "session/xed25519.hpp"
 
-using session::xed25519::ustring_view;
+using session::xed25519::uspan;
 
 constexpr std::array<unsigned char, 64> seed1{
         0xfe, 0xcd, 0x9a, 0x60, 0x34, 0xbc, 0x9a, 0xba, 0x27, 0x39, 0x25, 0xde, 0xe7,
@@ -22,8 +22,8 @@ constexpr std::array<unsigned char, 64> seed2{
         0x45, 0x44, 0xc1, 0xc5, 0x08, 0x9c, 0x40, 0x41, 0x4b, 0xbd, 0xa1, 0xff, 0xdd,
         0xe8, 0xaa, 0xb2, 0x61, 0x7f, 0xe9, 0x37, 0xee, 0x74, 0xa5, 0xee, 0x81};
 
-constexpr ustring_view pub1{seed1.data() + 32, 32};
-constexpr ustring_view pub2{seed2.data() + 32, 32};
+constexpr uspan pub1{seed1.data() + 32, 32};
+constexpr uspan pub2{seed2.data() + 32, 32};
 
 constexpr std::array<unsigned char, 32> xpub1{
         0xfe, 0x94, 0xb7, 0xad, 0x4b, 0x7f, 0x1c, 0xc1, 0xbb, 0x92, 0x67,
@@ -43,11 +43,11 @@ constexpr std::array<unsigned char, 32> pub2_abs{
 };
 
 template <size_t N>
-static ustring_view view(const std::array<unsigned char, N>& x) {
+static uspan view(const std::array<unsigned char, N>& x) {
     return {x.data(), x.size()};
 }
-static ustring_view view(const std::string_view x) {
-    return ustring_view{reinterpret_cast<const unsigned char*>(x.data()), x.size()};
+static uspan view(const std::string_view x) {
+    return uspan{reinterpret_cast<const unsigned char*>(x.data()), x.size()};
 }
 template <size_t N>
 static std::string view_hex(const std::array<unsigned char, N>& x) {

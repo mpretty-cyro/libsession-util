@@ -14,8 +14,6 @@
 
 using namespace std::literals;
 using namespace session::config;
-using session::ustring;
-using session::ustring_view;
 
 LIBSESSION_C_API const size_t CONTACT_MAX_NAME_LENGTH = contact_info::MAX_NAME_LENGTH;
 
@@ -56,7 +54,7 @@ void contact_info::set_nickname_truncated(std::string n) {
     set_nickname(utf8_truncate(std::move(n), MAX_NAME_LENGTH));
 }
 
-Contacts::Contacts(ustring_view ed25519_secretkey, std::optional<ustring_view> dumped) :
+Contacts::Contacts(uspan ed25519_secretkey, std::optional<uspan> dumped) :
         ConfigBase{dumped} {
     load_key(ed25519_secretkey);
 }

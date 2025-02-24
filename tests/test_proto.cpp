@@ -19,7 +19,7 @@ const std::vector<Namespace> groups{
 const auto seed = "0123456789abcdef0123456789abcdef00000000000000000000000000000000"_hexbytes;
 std::array<unsigned char, 32> ed_pk_raw;
 std::array<unsigned char, 64> ed_sk_raw;
-ustring_view load_seed() {
+uspan load_seed() {
     crypto_sign_ed25519_seed_keypair(ed_pk_raw.data(), ed_sk_raw.data(), seed.data());
     return {ed_sk_raw.data(), ed_sk_raw.size()};
 }
@@ -83,7 +83,7 @@ TEST_CASE("Protobuf old config loading test", "[config][proto][old]") {
     std::array<unsigned char, 32> ed_pk_raw;
     std::array<unsigned char, 64> ed_sk_raw;
     crypto_sign_ed25519_seed_keypair(ed_pk_raw.data(), ed_sk_raw.data(), seed.data());
-    ustring_view ed_sk{ed_sk_raw.data(), ed_sk_raw.size()};
+    uspan ed_sk{ed_sk_raw.data(), ed_sk_raw.size()};
 
     auto old_conf =
             "080112c2060a03505554120f2f6170692f76312f6d6573736167651a9f060806120028e1c5a0beaf313801"

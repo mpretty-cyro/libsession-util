@@ -33,10 +33,10 @@ static auto sys_time_from_ms(int64_t milliseconds_since_epoch) {
 }
 
 Keys::Keys(
-        ustring_view user_ed25519_secretkey,
-        ustring_view group_ed25519_pubkey,
-        std::optional<ustring_view> group_ed25519_secretkey,
-        std::optional<ustring_view> dumped,
+        uspan user_ed25519_secretkey,
+        uspan group_ed25519_pubkey,
+        std::optional<uspan> group_ed25519_secretkey,
+        std::optional<uspan> dumped,
         Info& info,
         Members& members) {
 
@@ -111,7 +111,7 @@ ustring Keys::make_dump() const {
     return ustring{to_unsigned_sv(d.view())};
 }
 
-void Keys::load_dump(ustring_view dump) {
+void Keys::load_dump(uspan dump) {
     oxenc::bt_dict_consumer d{from_unsigned_sv(dump)};
 
     if (d.skip_until("A")) {
@@ -185,8 +185,8 @@ size_t Keys::size() const {
     return keys_.size() + !pending_key_config_.empty();
 }
 
-std::vector<ustring_view> Keys::group_keys() const {
-    std::vector<ustring_view> ret;
+std::vector<uspan> Keys::group_keys() const {
+    std::vector<uspan> ret;
     ret.reserve(size());
 
     if (!pending_key_config_.empty())
@@ -198,7 +198,7 @@ std::vector<ustring_view> Keys::group_keys() const {
     return ret;
 }
 
-ustring_view Keys::group_enc_key() const {
+uspan Keys::group_enc_key() const {
     if (!pending_key_config_.empty())
         return {pending_key_.data(), 32};
     if (keys_.empty())
@@ -208,7 +208,7 @@ ustring_view Keys::group_enc_key() const {
     return {key.data(), key.size()};
 }
 
-void Keys::load_admin_key(ustring_view seed, Info& info, Members& members) {
+void Keys::load_admin_key(uspan seed, Info& info, Members& members) {
     if (admin())
         return;
 
@@ -244,14 +244,14 @@ namespace {
     }
 
     constexpr auto seed_hash_key = "SessionGroupKeySeed"sv;
-    const ustring_view enc_key_hash_key = to_unsigned_sv("SessionGroupKeyGen"sv);
+    const uspan enc_key_hash_key = to_unsigned_sv("SessionGroupKeyGen"sv);
     constexpr auto enc_key_admin_hash_key = "SessionGroupKeyAdminKey"sv;
     constexpr auto enc_key_member_hash_key = "SessionGroupKeyMemberKey"sv;
-    const ustring_view junk_seed_hash_key = to_unsigned_sv("SessionGroupJunkMembers"sv);
+    const uspan junk_seed_hash_key = to_unsigned_sv("SessionGroupJunkMembers"sv);
 
 }  // namespace
 
-ustring_view Keys::rekey(Info& info, Members& members) {
+uspan Keys::rekey(Info& info, Members& members) {
     if (!admin())
         throw std::logic_error{
                 "Unable to issue a new group encryption key without the main group keys"};
@@ -310,8 +310,8 @@ ustring_view Keys::rekey(Info& info, Members& members) {
 
     crypto_generichash_blake2b_final(&st, h1.data(), h1.size());
 
-    ustring_view enc_key{h1.data(), 32};
-    ustring_view nonce{h1.data() + 32, 24};
+    uspan enc_key{h1.data(), 32};
+    uspan nonce{h1.data() + 32, 24};
 
     oxenc::bt_dict_producer d{};
 
@@ -346,7 +346,7 @@ ustring_view Keys::rekey(Info& info, Members& members) {
         auto member_keys = d.append_list("k");
         int member_count = 0;
         std::vector<std::array<unsigned char, 32>> member_xpk_raw;
-        std::vector<ustring_view> member_xpks;
+        std::vector<uspan> member_xpks;
         member_xpk_raw.reserve(members.size());
         member_xpks.reserve(members.size());
         for (const auto& m : members) {
@@ -361,7 +361,7 @@ ustring_view Keys::rekey(Info& info, Members& members) {
                 to_sv(group_xsk),
                 to_sv(group_xpk),
                 enc_key_member_hash_key,
-                [&](ustring_view enc_sv) {
+                [&](uspan enc_sv) {
                     member_keys.append(enc_sv);
                     member_count++;
                 },
@@ -392,7 +392,7 @@ ustring_view Keys::rekey(Info& info, Members& members) {
 
     // Finally we sign the message at put it as the ~ key (which is 0x7e, and thus comes later than
     // any other printable ascii key).
-    d.append_signature("~", [this](ustring_view to_sign) { return sign(to_sign); });
+    d.append_signature("~", [this](uspan to_sign) { return sign(to_sign); });
 
     // Load this key/config/gen into our pending variables
     pending_gen_ = gen;
@@ -410,10 +410,10 @@ ustring_view Keys::rekey(Info& info, Members& members) {
 
     needs_dump_ = true;
 
-    return ustring_view{pending_key_config_.data(), pending_key_config_.size()};
+    return uspan{pending_key_config_.data(), pending_key_config_.size()};
 }
 
-ustring Keys::sign(ustring_view data) const {
+ustring Keys::sign(uspan data) const {
     auto sig = signer_(data);
     if (sig.size() != 64)
         throw std::logic_error{"Invalid signature: signing function did not return 64 bytes"};
@@ -486,7 +486,7 @@ ustring Keys::key_supplement(const std::vector<std::string>& sids) const {
 
     crypto_generichash_blake2b_final(&st, h1.data(), h1.size());
 
-    ustring_view nonce{h1.data(), h1.size()};
+    uspan nonce{h1.data(), h1.size()};
 
     oxenc::bt_dict_producer d{};
 
@@ -500,7 +500,7 @@ ustring Keys::key_supplement(const std::vector<std::string>& sids) const {
         size_t member_count = 0;
 
         std::vector<std::array<unsigned char, 32>> member_xpk_raw;
-        std::vector<ustring_view> member_xpks;
+        std::vector<uspan> member_xpks;
         member_xpk_raw.reserve(sids.size());
         member_xpks.reserve(sids.size());
         for (const auto& sid : sids) {
@@ -515,7 +515,7 @@ ustring Keys::key_supplement(const std::vector<std::string>& sids) const {
                 to_sv(group_xsk),
                 to_sv(group_xpk),
                 enc_key_member_hash_key,
-                [&](ustring_view encrypted) {
+                [&](uspan encrypted) {
                     list.append(encrypted);
                     member_count++;
                 },
@@ -531,7 +531,7 @@ ustring Keys::key_supplement(const std::vector<std::string>& sids) const {
 
     // Finally we sign the message at put it as the ~ key (which is 0x7e, and thus comes later than
     // any other printable ascii key).
-    d.append_signature("~", [this](ustring_view to_sign) { return sign(to_sign); });
+    d.append_signature("~", [this](uspan to_sign) { return sign(to_sign); });
 
     return ustring{to_unsigned_sv(d.view())};
 }
@@ -600,7 +600,7 @@ ustring Keys::swarm_make_subaccount(std::string_view session_id, bool write, boo
     auto k = subaccount_blind_factor(X);
 
     // T = |S|
-    auto T = xed25519::pubkey(ustring_view{X.data(), X.size()});
+    auto T = xed25519::pubkey(uspan{X.data(), X.size()});
 
     // kT is the user's Ed25519 blinded pubkey:
     std::array<unsigned char, 32> kT;
@@ -636,7 +636,7 @@ ustring Keys::swarm_subaccount_token(std::string_view session_id, bool write, bo
     auto k = subaccount_blind_factor(X);
 
     // T = |S|
-    auto T = xed25519::pubkey(ustring_view{X.data(), X.size()});
+    auto T = xed25519::pubkey(uspan{X.data(), X.size()});
 
     ustring out;
     out.resize(4 + 32);
@@ -650,7 +650,7 @@ ustring Keys::swarm_subaccount_token(std::string_view session_id, bool write, bo
 }
 
 Keys::swarm_auth Keys::swarm_subaccount_sign(
-        ustring_view msg, ustring_view sign_val, bool binary) const {
+        uspan msg, uspan sign_val, bool binary) const {
     if (sign_val.size() != 100)
         throw std::logic_error{"Invalid signing value: size is wrong"};
 
@@ -662,7 +662,7 @@ Keys::swarm_auth Keys::swarm_subaccount_sign(
 
     // (see above for variable/crypto notation)
 
-    ustring_view k = sign_val.substr(4, 32);
+    uspan k = sign_val.substr(4, 32);
 
     // our token is the first 4 bytes of `sign_val` (flags, etc.), followed by kT which we have to
     // compute:
@@ -678,7 +678,7 @@ Keys::swarm_auth Keys::swarm_subaccount_sign(
         throw std::runtime_error{"scalarmult failed: perhaps an invalid session id or seed?"};
 
     // token is now set: flags || kT
-    ustring_view kT{to_unsigned(token.data() + 4), 32};
+    uspan kT{to_unsigned(token.data() + 4), 32};
 
     // sub_sig is just the admin's signature, sitting at the end of sign_val (after 4f || k):
     sub_sig = from_unsigned_sv(sign_val.substr(36));
@@ -769,12 +769,12 @@ Keys::swarm_auth Keys::swarm_subaccount_sign(
     return result;
 }
 
-bool Keys::swarm_verify_subaccount(ustring_view sign_val, bool write, bool del) const {
+bool Keys::swarm_verify_subaccount(uspan sign_val, bool write, bool del) const {
     if (!_sign_pk)
         return false;
     return swarm_verify_subaccount(
             "03" + oxenc::to_hex(_sign_pk->begin(), _sign_pk->end()),
-            ustring_view{user_ed25519_sk.data(), user_ed25519_sk.size()},
+            uspan{user_ed25519_sk.data(), user_ed25519_sk.size()},
             sign_val,
             write,
             del);
@@ -782,8 +782,8 @@ bool Keys::swarm_verify_subaccount(ustring_view sign_val, bool write, bool del) 
 
 bool Keys::swarm_verify_subaccount(
         std::string group_id,
-        ustring_view user_ed_sk,
-        ustring_view sign_val,
+        uspan user_ed_sk,
+        uspan sign_val,
         bool write,
         bool del) {
     auto group_pk = session_id_pk(group_id, "03");
@@ -791,7 +791,7 @@ bool Keys::swarm_verify_subaccount(
     if (sign_val.size() != 100)
         return false;
 
-    ustring_view prefix = sign_val.substr(0, 4);
+    uspan prefix = sign_val.substr(0, 4);
     if (prefix[0] != 0x03 && !(prefix[1] & SUBACC_FLAG_ANY_PREFIX))
         return false;  // require either 03 prefix match, or the "any prefix" flag
 
@@ -804,8 +804,8 @@ bool Keys::swarm_verify_subaccount(
     if (del && !(prefix[1] & SUBACC_FLAG_DEL))
         return false;  // we require delete, but it isn't set
 
-    ustring_view k = sign_val.substr(4, 32);
-    ustring_view sig = sign_val.substr(36);
+    uspan k = sign_val.substr(4, 32);
+    uspan sig = sign_val.substr(36);
 
     // T = |S|, i.e. we have to clear the sign bit from our pubkey
     std::array<unsigned char, 32> T;
@@ -827,10 +827,10 @@ bool Keys::swarm_verify_subaccount(
                         sig.data(), to_verify.data(), to_verify.size(), group_pk.data());
 }
 
-std::optional<ustring_view> Keys::pending_config() const {
+std::optional<uspan> Keys::pending_config() const {
     if (pending_key_config_.empty())
         return std::nullopt;
-    return ustring_view{pending_key_config_.data(), pending_key_config_.size()};
+    return uspan{pending_key_config_.data(), pending_key_config_.size()};
 }
 
 void Keys::insert_key(std::string_view msg_hash, key_info&& new_key) {
@@ -875,7 +875,7 @@ void Keys::insert_key(std::string_view msg_hash, key_info&& new_key) {
 // Returns true (after writing to `out`) if decryption succeeds, false if it fails.
 namespace {
     bool try_decrypting(
-            unsigned char* out, ustring_view encrypted, ustring_view nonce, ustring_view key) {
+            unsigned char* out, uspan encrypted, uspan nonce, uspan key) {
         assert(encrypted.size() >= crypto_aead_xchacha20poly1305_ietf_ABYTES);
         assert(nonce.size() == crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
         assert(key.size() == crypto_aead_xchacha20poly1305_ietf_KEYBYTES);
@@ -893,17 +893,17 @@ namespace {
     }
     bool try_decrypting(
             unsigned char* out,
-            ustring_view encrypted,
-            ustring_view nonce,
+            uspan encrypted,
+            uspan nonce,
 
             const std::array<unsigned char, 32>& key) {
-        return try_decrypting(out, encrypted, nonce, ustring_view{key.data(), key.size()});
+        return try_decrypting(out, encrypted, nonce, uspan{key.data(), key.size()});
     }
 }  // namespace
 
 bool Keys::load_key_message(
         std::string_view hash,
-        ustring_view data,
+        uspan data,
         int64_t timestamp_ms,
         Info& info,
         Members& members) {
@@ -937,7 +937,7 @@ bool Keys::load_key_message(
 
         int member_key_pos = -1;
 
-        auto next_ciphertext = [&]() -> std::optional<ustring_view> {
+        auto next_ciphertext = [&]() -> std::optional<uspan> {
             while (!supp.is_finished()) {
                 member_key_pos++;
                 auto encrypted = to_unsigned_sv(supp.consume_string_view());
@@ -1042,7 +1042,7 @@ bool Keys::load_key_message(
         auto key_list = d.consume_list_consumer();
 
         int member_key_pos = -1;
-        auto next_ciphertext = [&]() -> std::optional<ustring_view> {
+        auto next_ciphertext = [&]() -> std::optional<uspan> {
             while (!key_list.is_finished()) {
                 member_key_pos++;
                 auto member_key = to_unsigned_sv(key_list.consume_string_view());
@@ -1179,16 +1179,16 @@ bool Keys::needs_rekey() const {
     return last_it->generation == second_it->generation;
 }
 
-std::optional<ustring_view> Keys::pending_key() const {
+std::optional<uspan> Keys::pending_key() const {
     if (!pending_key_config_.empty())
-        return ustring_view{pending_key_.data(), pending_key_.size()};
+        return uspan{pending_key_.data(), pending_key_.size()};
     return std::nullopt;
 }
 
 static constexpr size_t ENCRYPT_OVERHEAD =
         crypto_aead_xchacha20poly1305_ietf_NPUBBYTES + crypto_aead_xchacha20poly1305_ietf_ABYTES;
 
-ustring Keys::encrypt_message(ustring_view plaintext, bool compress, size_t padding) const {
+ustring Keys::encrypt_message(uspan plaintext, bool compress, size_t padding) const {
     if (plaintext.size() > MAX_PLAINTEXT_MESSAGE_SIZE)
         throw std::runtime_error{"Cannot encrypt plaintext: message size is too large"};
     ustring _compressed;
@@ -1250,7 +1250,7 @@ ustring Keys::encrypt_message(ustring_view plaintext, bool compress, size_t padd
     ustring ciphertext;
     ciphertext.resize(ENCRYPT_OVERHEAD + encoded.size());
     randombytes_buf(ciphertext.data(), crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
-    ustring_view nonce{ciphertext.data(), crypto_aead_xchacha20poly1305_ietf_NPUBBYTES};
+    uspan nonce{ciphertext.data(), crypto_aead_xchacha20poly1305_ietf_NPUBBYTES};
     if (0 != crypto_aead_xchacha20poly1305_ietf_encrypt(
                      ciphertext.data() + crypto_aead_xchacha20poly1305_ietf_NPUBBYTES,
                      nullptr,
@@ -1266,7 +1266,7 @@ ustring Keys::encrypt_message(ustring_view plaintext, bool compress, size_t padd
     return ciphertext;
 }
 
-std::pair<std::string, ustring> Keys::decrypt_message(ustring_view ciphertext) const {
+std::pair<std::string, ustring> Keys::decrypt_message(uspan ciphertext) const {
     if (ciphertext.size() < ENCRYPT_OVERHEAD)
         throw std::runtime_error{"ciphertext is too small to be encrypted data"};
 
@@ -1334,7 +1334,7 @@ std::pair<std::string, ustring> Keys::decrypt_message(ustring_view ciphertext) c
     session_id += "05";
     oxenc::to_hex(x_pk.begin(), x_pk.end(), std::back_inserter(session_id));
 
-    ustring_view raw_data;
+    uspan raw_data;
     if (dict.skip_until("d")) {
         raw_data = to_unsigned_sv(dict.consume_string_view());
         if (raw_data.empty())
@@ -1447,12 +1447,12 @@ LIBSESSION_C_API int groups_keys_init(
 
     assert(user_ed25519_secretkey && group_ed25519_pubkey && cinfo && cmembers);
 
-    ustring_view user_sk{user_ed25519_secretkey, 64};
-    ustring_view group_pk{group_ed25519_pubkey, 32};
-    std::optional<ustring_view> group_sk;
+    uspan user_sk{user_ed25519_secretkey, 64};
+    uspan group_pk{group_ed25519_pubkey, 32};
+    std::optional<uspan> group_sk;
     if (group_ed25519_secretkey)
         group_sk.emplace(group_ed25519_secretkey, 64);
-    std::optional<ustring_view> dumped;
+    std::optional<uspan> dumped;
     if (dump && dumplen)
         dumped.emplace(dump, dumplen);
 
@@ -1510,7 +1510,7 @@ LIBSESSION_C_API bool groups_keys_load_admin_key(
             conf,
             [&] {
                 unbox(conf).load_admin_key(
-                        ustring_view{secret, 32},
+                        uspan{secret, 32},
                         *unbox<groups::Info>(info),
                         *unbox<groups::Members>(members));
                 return true;
@@ -1526,7 +1526,7 @@ LIBSESSION_C_API bool groups_keys_rekey(
         size_t* outlen) {
     assert(info && members);
     auto& keys = unbox(conf);
-    ustring_view to_push;
+    uspan to_push;
 
     return wrap_exceptions(
             conf,
@@ -1566,7 +1566,7 @@ LIBSESSION_C_API bool groups_keys_load_message(
             [&] {
                 unbox(conf).load_key_message(
                         msg_hash,
-                        ustring_view{data, datalen},
+                        uspan{data, datalen},
                         timestamp_ms,
                         *unbox<groups::Info>(info),
                         *unbox<groups::Members>(members));
@@ -1606,7 +1606,7 @@ LIBSESSION_C_API void groups_keys_encrypt_message(
 
     ustring ciphertext;
     try {
-        ciphertext = unbox(conf).encrypt_message(ustring_view{plaintext_in, plaintext_len});
+        ciphertext = unbox(conf).encrypt_message(uspan{plaintext_in, plaintext_len});
         *ciphertext_out = static_cast<unsigned char*>(std::malloc(ciphertext.size()));
         std::memcpy(*ciphertext_out, ciphertext.data(), ciphertext.size());
         *ciphertext_len = ciphertext.size();
@@ -1629,7 +1629,7 @@ LIBSESSION_C_API bool groups_keys_decrypt_message(
             conf,
             [&] {
                 auto [sid, plaintext] =
-                        unbox(conf).decrypt_message(ustring_view{ciphertext_in, ciphertext_len});
+                        unbox(conf).decrypt_message(uspan{ciphertext_in, ciphertext_len});
                 std::memcpy(session_id, sid.c_str(), sid.size() + 1);
                 *plaintext_out = static_cast<unsigned char*>(std::malloc(plaintext.size()));
                 std::memcpy(*plaintext_out, plaintext.data(), plaintext.size());
@@ -1699,8 +1699,8 @@ LIBSESSION_C_API bool groups_keys_swarm_verify_subaccount_flags(
     try {
         return groups::Keys::swarm_verify_subaccount(
                 group_id,
-                ustring_view{session_ed25519_secretkey, 64},
-                ustring_view{signing_value, 100},
+                uspan{session_ed25519_secretkey, 64},
+                uspan{signing_value, 100},
                 write,
                 del);
     } catch (...) {
@@ -1715,8 +1715,8 @@ LIBSESSION_C_API bool groups_keys_swarm_verify_subaccount(
     try {
         return groups::Keys::swarm_verify_subaccount(
                 group_id,
-                ustring_view{session_ed25519_secretkey, 64},
-                ustring_view{signing_value, 100});
+                uspan{session_ed25519_secretkey, 64},
+                uspan{signing_value, 100});
     } catch (...) {
         return false;
     }
@@ -1736,7 +1736,7 @@ LIBSESSION_C_API bool groups_keys_swarm_subaccount_sign(
             conf,
             [&] {
                 auto auth = unbox(conf).swarm_subaccount_sign(
-                        ustring_view{msg, msg_len}, ustring_view{signing_value, 100});
+                        uspan{msg, msg_len}, uspan{signing_value, 100});
                 assert(auth.subaccount.size() == 48);
                 assert(auth.subaccount_sig.size() == 88);
                 assert(auth.signature.size() == 88);
@@ -1765,7 +1765,7 @@ LIBSESSION_C_API bool groups_keys_swarm_subaccount_sign_binary(
             conf,
             [&] {
                 auto auth = unbox(conf).swarm_subaccount_sign(
-                        ustring_view{msg, msg_len}, ustring_view{signing_value, 100}, true);
+                        uspan{msg, msg_len}, uspan{signing_value, 100}, true);
                 assert(auth.subaccount.size() == 36);
                 assert(auth.subaccount_sig.size() == 64);
                 assert(auth.signature.size() == 64);

@@ -63,7 +63,7 @@ TEST_CASE("Group Info settings", "[config][groups][info]") {
     CHECK(ginfo1.needs_dump());
     CHECK_FALSE(ginfo1.needs_push());
 
-    std::vector<std::pair<std::string, ustring_view>> merge_configs;
+    std::vector<std::pair<std::string, uspan>> merge_configs;
     merge_configs.emplace_back("fakehash1", p1);
     CHECK(ginfo2.merge(merge_configs) == std::vector{{"fakehash1"s}});
     CHECK_FALSE(ginfo2.needs_push());
@@ -194,7 +194,7 @@ TEST_CASE("Verify-only Group Info", "[config][groups][verify-only]") {
     CHECK(ginfo_rw.needs_dump());
     CHECK_FALSE(ginfo_rw.needs_push());
 
-    std::vector<std::pair<std::string, ustring_view>> merge_configs;
+    std::vector<std::pair<std::string, uspan>> merge_configs;
     merge_configs.emplace_back("fakehash1", to_push);
     CHECK(ginfo.merge(merge_configs) == std::vector{{"fakehash1"s}});
     CHECK_FALSE(ginfo.needs_push());

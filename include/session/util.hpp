@@ -1,6 +1,7 @@
 #pragma once
 
 #include <oxenc/common.h>
+#include <oxenc/span.h>
 
 #include <array>
 #include <cassert>
@@ -17,65 +18,132 @@
 
 namespace session {
 
-// Helper function to go to/from char pointers to unsigned char pointers:
-inline const unsigned char* to_unsigned(const char* x) {
-    return reinterpret_cast<const unsigned char*>(x);
+using namespace oxenc;
+
+namespace detail {
+    // Base function: takes any basic_char in, outputs any other
+    template <oxenc::basic_char Out, oxenc::basic_char In>
+    inline const_span<Out> to_span(const In* data, size_t datalen)
+    {
+        return {reinterpret_cast<const Out*>(data), datalen};
+    }
 }
-inline unsigned char* to_unsigned(char* x) {
-    return reinterpret_cast<unsigned char*>(x);
+
+// specialize base to return byte span, but accept ANY str/sv
+template <oxenc::string_like T>
+inline bspan str_to_bspan(const T& sv)
+{
+    return detail::to_span<std::byte>(sv.data(), sv.size());
 }
-inline const unsigned char* to_unsigned(const std::byte* x) {
-    return reinterpret_cast<const unsigned char*>(x);
+
+// specialize base to return unsigned span, but accept ANY str/sv
+template <oxenc::string_like T>
+inline uspan str_to_uspan(const T& sv)
+{
+    return detail::to_span<unsigned char>(sv.data(), sv.size());
 }
-inline unsigned char* to_unsigned(std::byte* x) {
-    return reinterpret_cast<unsigned char*>(x);
+
+template <std::size_t N>
+inline uspan str_to_uspan(const char (&literal)[N])
+{
+    return detail::to_span<unsigned char>(literal, N - 1);
 }
-// These do nothing, but having them makes template metaprogramming easier:
-inline const unsigned char* to_unsigned(const unsigned char* x) {
-    return x;
+
+// just accept string_view, output any span-type
+template <oxenc::basic_char Out>
+inline const_span<Out> sv_to_span(std::string_view in)
+{
+    return {reinterpret_cast<const Out*>(in.data()), in.size()};
 }
-inline unsigned char* to_unsigned(unsigned char* x) {
-    return x;
+
+template <oxenc::basic_char Out, oxenc::basic_char In>
+inline std::span<const Out> span_to_span(const std::span<const In>& sp)
+{
+    return detail::to_span<Out>(sp.data(), sp.size());
 }
-inline const char* from_unsigned(const unsigned char* x) {
-    return reinterpret_cast<const char*>(x);
+
+template <oxenc::basic_char Out, oxenc::basic_char In>
+inline std::vector<Out> span_to_vector(const std::span<const In>& sp)
+{
+    auto begin = reinterpret_cast<const Out*>(sp.data());
+    return {begin, begin + sp.size()};
 }
-inline char* from_unsigned(unsigned char* x) {
-    return reinterpret_cast<char*>(x);
+
+template <oxenc::basic_char In>
+std::string span_to_str(const std::span<const In>& sp) {
+    return std::string(reinterpret_cast<const char*>(sp.data()), sp.size());
 }
-// Helper to switch from basic_string_view<CFrom> to basic_string_view<CTo>.  Both CFrom and CTo
-// must be primitive, one-byte types.
-template <oxenc::basic_char CTo, oxenc::basic_char CFrom>
-inline std::basic_string_view<CTo> convert_sv(std::basic_string_view<CFrom> from) {
-    return {reinterpret_cast<const CTo*>(from.data()), from.size()};
+
+inline std::vector<unsigned char> to_unsigned_sv(std::string_view v) {
+    auto begin = reinterpret_cast<const char*>(v.data());
+    return {begin, begin + v.size()};
 }
-// Same as above, but with a const basic_string<CFrom>& argument (to allow deduction of CFrom when
-// using a basic_string<CFrom>).
-template <oxenc::basic_char CTo, oxenc::basic_char CFrom>
-inline std::basic_string_view<CTo> convert_sv(const std::basic_string<CFrom>& from) {
-    return {reinterpret_cast<const CTo*>(from.data()), from.size()};
+
+inline std::string_view from_unsigned_v(const std::vector<unsigned char>& v) {
+    return {reinterpret_cast<const char*>(v.data()), v.size()};
 }
-// Helper function to switch between basic_string_view<C> and ustring_view
-inline ustring_view to_unsigned_sv(std::string_view v) {
-    return {to_unsigned(v.data()), v.size()};
-}
-inline ustring_view to_unsigned_sv(std::basic_string_view<std::byte> v) {
-    return {to_unsigned(v.data()), v.size()};
-}
-inline ustring_view to_unsigned_sv(ustring_view v) {
-    return v;  // no-op, but helps with template metaprogamming
-}
-inline std::string_view from_unsigned_sv(ustring_view v) {
-    return {from_unsigned(v.data()), v.size()};
-}
-template <size_t N>
-inline std::string_view from_unsigned_sv(const std::array<unsigned char, N>& v) {
-    return {from_unsigned(v.data()), v.size()};
-}
-template <typename T, typename A>
-inline std::string_view from_unsigned_sv(const std::vector<T, A>& v) {
-    return {from_unsigned(v.data()), v.size()};
-}
+
+// std::vector<unsigned char>
+
+// // Helper function to go to/from char pointers to unsigned char pointers:
+// inline const unsigned char* to_unsigned(const char* x) {
+//     return reinterpret_cast<const unsigned char*>(x);
+// }
+// inline unsigned char* to_unsigned(char* x) {
+//     return reinterpret_cast<unsigned char*>(x);
+// }
+// inline const unsigned char* to_unsigned(const std::byte* x) {
+//     return reinterpret_cast<const unsigned char*>(x);
+// }
+// inline unsigned char* to_unsigned(std::byte* x) {
+//     return reinterpret_cast<unsigned char*>(x);
+// }
+// // These do nothing, but having them makes template metaprogramming easier:
+// inline const unsigned char* to_unsigned(const unsigned char* x) {
+//     return x;
+// }
+// inline unsigned char* to_unsigned(unsigned char* x) {
+//     return x;
+// }
+// inline const char* from_unsigned(const unsigned char* x) {
+//     return reinterpret_cast<const char*>(x);
+// }
+// inline char* from_unsigned(unsigned char* x) {
+//     return reinterpret_cast<char*>(x);
+// }
+// // Helper to switch from basic_string_view<CFrom> to basic_string_view<CTo>.  Both CFrom and CTo
+// // must be primitive, one-byte types.
+// template <oxenc::basic_char CTo, oxenc::basic_char CFrom>
+// inline std::basic_string_view<CTo> convert_sv(std::basic_string_view<CFrom> from) {
+//     return {reinterpret_cast<const CTo*>(from.data()), from.size()};
+// }
+// // Same as above, but with a const basic_string<CFrom>& argument (to allow deduction of CFrom when
+// // using a basic_string<CFrom>).
+// template <oxenc::basic_char CTo, oxenc::basic_char CFrom>
+// inline std::basic_string_view<CTo> convert_sv(const std::basic_string<CFrom>& from) {
+//     return {reinterpret_cast<const CTo*>(from.data()), from.size()};
+// }
+// // Helper function to switch between basic_string_view<C> and uspan
+// inline uspan to_unsigned_sv(std::string_view v) {
+//     return {to_unsigned(v.data()), v.size()};
+// }
+// inline uspan to_unsigned_sv(std::basic_string_view<std::byte> v) {
+//     return {to_unsigned(v.data()), v.size()};
+// }
+// inline uspan to_unsigned_sv(uspan v) {
+//     return v;  // no-op, but helps with template metaprogamming
+// }
+// inline std::string_view from_unsigned_sv(uspan v) {
+//     return {from_unsigned(v.data()), v.size()};
+// }
+// template <size_t N>
+// inline std::string_view from_unsigned_sv(const std::array<unsigned char, N>& v) {
+//     return {from_unsigned(v.data()), v.size()};
+// }
+// template <typename T, typename A>
+// inline std::string_view from_unsigned_sv(const std::vector<T, A>& v) {
+//     return {from_unsigned(v.data()), v.size()};
+// }
 template <typename Char, size_t N>
 inline std::basic_string_view<Char> to_sv(const std::array<Char, N>& v) {
     return {v.data(), N};
@@ -97,10 +165,10 @@ using uc32 = std::array<unsigned char, 32>;
 using uc33 = std::array<unsigned char, 33>;
 using uc64 = std::array<unsigned char, 64>;
 
-/// Takes a container of string-like binary values and returns a vector of ustring_views viewing
+/// Takes a container of string-like binary values and returns a vector of uspans viewing
 /// those values.  This can be used on a container of any type with a `.data()` and a `.size()`
 /// where `.data()` is a one-byte value pointer; std::string, std::string_view, ustring,
-/// ustring_view, etc. apply, as does std::array of 1-byte char types.
+/// uspan, etc. apply, as does std::array of 1-byte char types.
 ///
 /// This is useful in various libsession functions that require such a vector.  Note that the
 /// returned vector's views are valid only as the original container remains alive; this is
@@ -111,8 +179,8 @@ using uc64 = std::array<unsigned char, 64>;
 /// There are two versions of this: the first takes a generic iterator pair; the second takes a
 /// single container.
 template <typename It>
-std::vector<ustring_view> to_view_vector(It begin, It end) {
-    std::vector<ustring_view> vec;
+std::vector<uspan> to_view_vector(It begin, It end) {
+    std::vector<uspan> vec;
     vec.reserve(std::distance(begin, end));
     for (; begin != end; ++begin) {
         if constexpr (std::is_same_v<std::remove_cv_t<decltype(*begin)>, char*>)  // C strings
@@ -129,7 +197,7 @@ std::vector<ustring_view> to_view_vector(It begin, It end) {
 }
 
 template <typename Container>
-std::vector<ustring_view> to_view_vector(const Container& c) {
+std::vector<uspan> to_view_vector(const Container& c) {
     return to_view_vector(c.begin(), c.end());
 }
 
@@ -213,6 +281,17 @@ inline std::string utf8_truncate(std::string val, size_t n) {
 
     val.resize(n);
     return val;
+}
+
+inline size_t find_last_not_of(const std::vector<unsigned char>& content, unsigned char value) {
+    // Use reverse iterators to find the first element (from the end) that is not equal to 'value'
+    auto rit = std::find_if(content.rbegin(), content.rend(),
+                            [value](unsigned char c) { return c != value; });
+    if (rit != content.rend()) {
+        // Note: rit.base() returns an iterator pointing to the element _after_ the found element.
+        return std::distance(content.begin(), rit.base()) - 1;
+    }
+    return std::string::npos;
 }
 
 }  // namespace session

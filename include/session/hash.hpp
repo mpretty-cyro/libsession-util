@@ -18,6 +18,6 @@ namespace session::hash {
 ///
 /// Outputs:
 /// - a `size` byte hash.
-ustring hash(const size_t size, ustring_view msg, std::optional<ustring_view> key = std::nullopt);
+std::vector<unsigned char> hash(const size_t size, uspan msg, std::optional<uspan> key = std::nullopt);
 
 }  // namespace session::hash

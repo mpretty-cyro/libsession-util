@@ -25,14 +25,14 @@ using namespace oxenc::literals;
 
 using namespace session::config;
 
-static std::array<unsigned char, 64> sk_from_seed(ustring_view seed) {
+static std::array<unsigned char, 64> sk_from_seed(uspan seed) {
     std::array<unsigned char, 32> ignore;
     std::array<unsigned char, 64> sk;
     crypto_sign_ed25519_seed_keypair(ignore.data(), sk.data(), seed.data());
     return sk;
 }
 
-static std::string session_id_from_ed(ustring_view ed_pk) {
+static std::string session_id_from_ed(uspan ed_pk) {
     std::string sid;
     std::array<unsigned char, 32> xpk;
     int rc = crypto_sign_ed25519_pk_to_curve25519(xpk.data(), ed_pk.data());
@@ -54,7 +54,7 @@ struct hacky_list : std::list<T> {
 
 struct pseudo_client {
     std::array<unsigned char, 64> secret_key;
-    const ustring_view public_key{secret_key.data() + 32, 32};
+    const uspan public_key{secret_key.data() + 32, 32};
     std::string session_id{session_id_from_ed(public_key)};
 
     groups::Info info;
@@ -62,23 +62,23 @@ struct pseudo_client {
     groups::Keys keys;
 
     pseudo_client(
-            ustring_view seed,
+            uspan seed,
             bool admin,
             const unsigned char* gpk,
             std::optional<const unsigned char*> gsk,
-            std::optional<ustring_view> info_dump = std::nullopt,
-            std::optional<ustring_view> members_dump = std::nullopt,
-            std::optional<ustring_view> keys_dump = std::nullopt) :
+            std::optional<uspan> info_dump = std::nullopt,
+            std::optional<uspan> members_dump = std::nullopt,
+            std::optional<uspan> keys_dump = std::nullopt) :
             secret_key{sk_from_seed(seed)},
-            info{ustring_view{gpk, 32},
-                 admin ? std::make_optional<ustring_view>({*gsk, 64}) : std::nullopt,
+            info{uspan{gpk, 32},
+                 admin ? std::make_optional<uspan>({*gsk, 64}) : std::nullopt,
                  info_dump},
-            members{ustring_view{gpk, 32},
-                    admin ? std::make_optional<ustring_view>({*gsk, 64}) : std::nullopt,
+            members{uspan{gpk, 32},
+                    admin ? std::make_optional<uspan>({*gsk, 64}) : std::nullopt,
                     members_dump},
             keys{to_usv(secret_key),
-                 ustring_view{gpk, 32},
-                 admin ? std::make_optional<ustring_view>({*gsk, 64}) : std::nullopt,
+                 uspan{gpk, 32},
+                 admin ? std::make_optional<uspan>({*gsk, 64}) : std::nullopt,
                  keys_dump,
                  info,
                  members} {
@@ -142,8 +142,8 @@ TEST_CASE("Group Keys - C++ API", "[config][groups][keys][cpp]") {
     for (const auto& m : members)
         REQUIRE(m.members.size() == 0);
 
-    std::vector<std::pair<std::string, ustring_view>> info_configs;
-    std::vector<std::pair<std::string, ustring_view>> mem_configs;
+    std::vector<std::pair<std::string, uspan>> info_configs;
+    std::vector<std::pair<std::string, uspan>> mem_configs;
 
     // add admin account, re-key, distribute
     auto& admin1 = admins[0];
@@ -560,7 +560,7 @@ TEST_CASE("Group Keys - C++ API", "[config][groups][keys][cpp]") {
 TEST_CASE("Group Keys - C API", "[config][groups][keys][c]") {
     struct pseudo_client {
         std::array<unsigned char, 64> secret_key;
-        const ustring_view public_key{secret_key.data() + 32, 32};
+        const uspan public_key{secret_key.data() + 32, 32};
         std::string session_id{session_id_from_ed(public_key)};
 
         config_group_keys* keys;
@@ -843,7 +843,7 @@ TEST_CASE("Group Keys - swarm authentication", "[config][groups][keys][swarm]") 
     session::config::UserGroups member_gr2{member_seed, std::nullopt};
     auto [seqno, push, obs] = member_groups.push();
 
-    std::vector<std::pair<std::string, ustring_view>> gr_conf;
+    std::vector<std::pair<std::string, uspan>> gr_conf;
     gr_conf.emplace_back("fakehash1", push);
 
     member_gr2.merge(gr_conf);
@@ -914,7 +914,7 @@ TEST_CASE("Group Keys promotion", "[config][groups][keys][promotion]") {
     pseudo_client admin{admin1_seed, true, group_pk.data(), group_sk.data()};
     pseudo_client member{member1_seed, false, group_pk.data(), std::nullopt};
 
-    std::vector<std::pair<std::string, ustring_view>> configs;
+    std::vector<std::pair<std::string, uspan>> configs;
     {
         auto m = admin.members.get_or_construct(admin.session_id);
         m.admin = true;

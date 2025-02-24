@@ -146,7 +146,7 @@ namespace detail {
 struct request_info {
     static request_info make(
             onionreq::network_destination _dest,
-            std::optional<ustring> _original_body,
+            std::optional<std::vector<unsigned char>> _original_body,
             std::optional<session::onionreq::x25519_pubkey> _swarm_pk,
             std::chrono::milliseconds _request_timeout,
             std::optional<std::chrono::milliseconds> _request_and_path_build_timeout = std::nullopt,
