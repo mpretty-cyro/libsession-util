@@ -3,9 +3,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include <oxen/log.hpp>
 #include <oxen/log/format.hpp>
-#include <oxen/quic/network.hpp>
 #include <regex>
 #include <session/logging.hpp>
+
+#ifndef DISABLE_ONIONREQ
+#include <oxen/quic/network.hpp>
+#endif
 
 using namespace session;
 using namespace oxen;
@@ -94,6 +97,7 @@ TEST_CASE("Logging callbacks", "[logging]") {
 #endif
 }
 
+#ifndef DISABLE_ONIONREQ
 TEST_CASE("Logging callbacks with quic::Network", "[logging][network]") {
     oxen::log::clear_sinks();
     simple_logs.clear();
@@ -114,3 +118,4 @@ TEST_CASE("Logging callbacks with quic::Network", "[logging][network]") {
 #endif
     CHECK(simple_logs.back().find("Loop shutdown complete") != std::string::npos);
 }
+#endif
