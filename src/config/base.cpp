@@ -191,7 +191,13 @@ std::vector<std::string> ConfigBase::_merge(
             plaintexts.size(),
             configs.size());
 
+    std::unordered_set<std::string_view> seen = {_curr_hash};
     for (auto& [hash, plain] : plaintexts) {
+        // Exclude any configs which we've already seen (ie. in case the current config, or even the
+        // same config was provided multiple times)
+        if (auto [it, inserted] = seen.insert(hash); !inserted)
+            continue;
+
         // Remove prefix padding:
         if (auto p = plain.find_first_not_of((unsigned char)0); p > 0 && p != std::string::npos) {
             std::memmove(plain.data(), plain.data() + p, plain.size() - p);
@@ -272,6 +278,8 @@ std::vector<std::string> ConfigBase::_merge(
     // - confs that failed to parse (we can't understand them, so leave them behind as they may be
     //   some future message).
     std::optional<size_t> superconf = new_conf->unmerged_index();  // nullopt if we had to merge
+    // TODO: Remove (probably isn't needed now that we have the `seen` check when processing
+    // plaintexts)
     std::string_view superconf_hash =
             superconf && *superconf < all_hashes.size() ? all_hashes[*superconf] : "";
 
