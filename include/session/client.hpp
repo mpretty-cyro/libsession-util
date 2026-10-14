@@ -1720,27 +1720,23 @@ class Client {
             if (_jq.is_running())
                 f();
         } else
-            _post(std::forward<F>(f));
+            call_soon(std::forward<F>(f));
     }
+    /// A post that races `~Client`'s stop from another thread is dropped too: libquic throws for
+    /// it, and the queue then reports that it has stopped.
     template <typename F>
     void call_soon(F&& f) {
-        _post(std::forward<F>(f));
-    }
-    template <typename F>
-    void call_later(std::chrono::microseconds delay, F&& f) {
         try {
-            _jq.call_later(delay, std::forward<F>(f));
+            _jq.call_soon(std::forward<F>(f));
         } catch (const std::runtime_error&) {
             if (_jq.is_running())
                 throw;
         }
     }
-    /// Queues onto `_jq`, or drops the job if the queue has stopped -- including when `~Client`
-    /// stops it between another thread's call and this.
     template <typename F>
-    void _post(F&& f) {
+    void call_later(std::chrono::microseconds delay, F&& f) {
         try {
-            _jq.call_soon(std::forward<F>(f));
+            _jq.call_later(delay, std::forward<F>(f));
         } catch (const std::runtime_error&) {
             if (_jq.is_running())
                 throw;
