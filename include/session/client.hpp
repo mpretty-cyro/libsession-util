@@ -1709,17 +1709,42 @@ class Client {
     /// There is deliberately no `loop` member any more.  It read as the obvious way to defer work
     /// and was the wrong one, since the loop's own queue outlives every Core member that these
     /// jobs reach through `this`.  Anything genuinely wanting the loop says `core.loop()`.
+    ///
+    /// All three do nothing once `~Client` has stopped `_jq`: what arrives after that -- the
+    /// network completing what it held as it is torn down, a Core callback starting more -- is
+    /// dropped rather than run against a Client being destroyed.
     template <typename F>
     void call(F&& f) {
-        _jq.call(std::forward<F>(f));
+        if (_jq.inside()) {
+            // On the loop thread, where `stop()` also runs, so the answer cannot change before f.
+            if (_jq.is_running())
+                f();
+        } else
+            _post(std::forward<F>(f));
     }
     template <typename F>
     void call_soon(F&& f) {
-        _jq.call_soon(std::forward<F>(f));
+        _post(std::forward<F>(f));
     }
     template <typename F>
     void call_later(std::chrono::microseconds delay, F&& f) {
-        _jq.call_later(delay, std::forward<F>(f));
+        try {
+            _jq.call_later(delay, std::forward<F>(f));
+        } catch (const std::runtime_error&) {
+            if (_jq.is_running())
+                throw;
+        }
+    }
+    /// Queues onto `_jq`, or drops the job if the queue has stopped -- including when `~Client`
+    /// stops it between another thread's call and this.
+    template <typename F>
+    void _post(F&& f) {
+        try {
+            _jq.call_soon(std::forward<F>(f));
+        } catch (const std::runtime_error&) {
+            if (_jq.is_running())
+                throw;
+        }
     }
     /// By value, for the same reason as Core's: a reference returned here has escaped the loop.
     template <typename F>
@@ -1735,9 +1760,9 @@ class Client {
     // **Everything this class defers must go here**, not on `loop`.  The loop's own queue is not
     // emptied until `~Loop`, which is the last thing `~Core` does, so a job left on it keeps being
     // drained by the loop thread throughout the destruction of every Core member -- and every one
-    // of these jobs holds `this` and reaches through it into those members.  This queue stops as it
-    // is destroyed, before `core`, while all of that is still whole -- and `~Client` closes the
-    // network before anything else, so no network callback can post here after it has gone.
+    // of these jobs holds `this` and reaches through it into those members.  `~Client` stops this
+    // queue first, while all of that is still whole, and only then closes the network -- so what
+    // the network completes as it goes is dropped here rather than run.
     //
     // `loop.call_get()` is the exception and stays as it is: the calling thread is blocked inside
     // it, so there is no window in which the caller can have gone away.

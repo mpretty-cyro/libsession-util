@@ -734,11 +734,17 @@ void Client::set_cache_dir(std::filesystem::path dir) {
 }
 
 Client::~Client() {
-    // First the network, while `_jq` is still whole.  Tearing it down fails every request it still
-    // holds, and an upload's completion posts onto `_jq` -- which is declared after `core`, so it
-    // is destroyed before `~Core` would get to the network.  Posted now, those completions are
-    // cancelled when `_jq` stops; and the network's per-chunk download posts stop before the disk
-    // queue does.
+    // First, `_jq` stopped: on the loop, so it lands between jobs and nothing of Client's is
+    // part-way through when it does, and dropping whatever was queued.  After this no Client job
+    // runs, Client defers nothing, and the auto-download pump does not start.
+    _jq.stop();
+
+    // Then the network.  Tearing it down completes whatever it still holds -- uploads failing, or
+    // succeeding in the moments before it stops -- and those continuations go through `call`,
+    // which now drops them: none of them runs against a network that is going, or reports to the
+    // subscribers of a Client that is.  And the network's per-chunk download posts stop before the
+    // disk queue does.  Before `core` goes, which would otherwise do this after `_jq` had been
+    // destroyed.
     core.close_network();
 
     // Then the disk queue, while everything a disk job reaches is still here.  On the disk loop,
@@ -2782,7 +2788,9 @@ void Client::_auto_download(const ConversationId& convo_id, int64_t message_id) 
 }
 
 void Client::_pump_auto_downloads() {
-    if (_auto_pumping)
+    // Also reached from Core callbacks, which run until `core` is gone: a Client being destroyed
+    // starts nothing, and must not reach for a network being torn down.
+    if (_auto_pumping || !_jq.is_running())
         return;
     _auto_pumping = true;
 
