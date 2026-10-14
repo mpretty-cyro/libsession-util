@@ -734,8 +734,15 @@ void Client::set_cache_dir(std::filesystem::path dir) {
 }
 
 Client::~Client() {
-    // First, while everything a disk job reaches is still here.  On the disk loop, so that a job
-    // already running there finishes before the queue stops rather than alongside it.
+    // First the network, while `_jq` is still whole.  Tearing it down fails every request it still
+    // holds, and an upload's completion posts onto `_jq` -- which is declared after `core`, so it
+    // is destroyed before `~Core` would get to the network.  Posted now, those completions are
+    // cancelled when `_jq` stops; and the network's per-chunk download posts stop before the disk
+    // queue does.
+    core.close_network();
+
+    // Then the disk queue, while everything a disk job reaches is still here.  On the disk loop,
+    // so that a job already running there finishes before the queue stops rather than alongside it.
     _disk_loop->call_get([this] { _disk_jq->stop(); });
 }
 

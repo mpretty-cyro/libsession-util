@@ -3779,3 +3779,61 @@ TEST_CASE(
     CHECK(std::filesystem::is_empty(out.path));
     CHECK(partial_cache_files(dir.path).empty());
 }
+
+namespace {
+// A MockNetwork whose uploads stay in flight until it is torn down, which then fails them -- as a
+// real Network fails whatever its transport still holds when it is destroyed.
+struct HoldingNetwork : MockNetwork {
+    using MockNetwork::MockNetwork;
+    std::vector<network::FileUploadRequest> held;
+
+    void upload_file(network::FileUploadRequest request, std::span<const std::byte>) override {
+        held.push_back(std::move(request));
+    }
+
+    ~HoldingNetwork() override {
+        for (auto& r : held)
+            if (r.on_complete)
+                r.on_complete(network::ERROR_REQUEST_CANCELLED, false);
+    }
+};
+}  // namespace
+
+TEST_CASE("Client: destroyed with an upload in flight", "[client][attachments][threads]") {
+    // An upload's completion posts onto Client's own queue, which is destroyed before Client's
+    // Core -- and Core's teardown is what fails the upload.  So ~Client closes the network first;
+    // without that, the failure posts onto a queue that no longer exists, which ASan reports and a
+    // plain build may or may not survive.
+    auto dir = std::filesystem::temp_directory_path() / random::unique_id("test_upload_close", 7);
+    std::filesystem::create_directories(dir);
+    auto photo = dir / "beach.png";
+    std::ofstream{photo, std::ios::binary} << "not really a file";
+
+    for (int round = 0; round < 3; round++) {
+        TempClient c;
+        auto net = std::make_unique<HoldingNetwork>(network::config::Config{});
+        auto* raw = net.get();
+        raw->core = &c->core;
+        c->core.set_network(std::move(net));
+
+        auto me = own_sid(*c);
+        TestHelper::seed_pfs_nak(c->core, me);
+        c->send_message(
+                ConversationId::dm(me),
+                {.attachments = {OutgoingAttachment{.path = photo}}},
+                await);
+
+        // The upload starts once the message is stored; wait until the network is holding it.
+        bool holding = false;
+        for (int i = 0; i < 200 && !holding; i++) {
+            holding = c->core.call_get([&] { return !raw->held.empty(); });
+            if (!holding)
+                std::this_thread::sleep_for(5ms);
+        }
+        REQUIRE(holding);
+
+        c.client.reset();
+    }
+
+    std::filesystem::remove_all(dir);
+}
