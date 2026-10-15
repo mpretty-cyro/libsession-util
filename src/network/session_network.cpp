@@ -232,7 +232,7 @@ Network::Network(config::Config _conf) :
     // Setup the router
     switch (config.router) {
         case opt::router::Type::onion_requests:
-            _router = _loop->make_shared<OnionRequestRouter>(
+            _router = OnionRequestRouter::make(
                     std::move(build_onion_request_router_config(config, file_server_config)),
                     *_loop,
                     *_disk_loop,

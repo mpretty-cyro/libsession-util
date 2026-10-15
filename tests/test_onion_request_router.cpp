@@ -21,6 +21,10 @@ using namespace session::network;
 namespace session::network {
 class TestOnionRequestRouter {
   public:
+    static bool ready(std::shared_ptr<OnionRequestRouter> router) {
+        return router->_jq.call_get([&] { return router->_ready; });
+    }
+
     static void set_paths(
             std::shared_ptr<OnionRequestRouter> router,
             PathCategory category,
@@ -148,9 +152,14 @@ namespace {
             SnodePool::record_node_failure(key, permanent);
         }
 
+        // Kept rather than run, so a test can decide when the refresh "completes".
+        std::function<void()> on_refresh_complete;
+
         void refresh_if_needed(
                 const std::vector<service_node>& /*in_use_nodes*/,
-                std::function<void()> /*on_refresh_complete*/ = nullptr) override {
+                std::function<void()> on_refresh_complete = nullptr) override {
+            if (on_refresh_complete)
+                this->on_refresh_complete = std::move(on_refresh_complete);
             func_called("refresh_if_needed");
             // Do nothing (don't want to trigger a cache refresh)
         }
@@ -825,6 +834,65 @@ TEST_CASE("Network", "[network][onion_request_router][check_request_queue_timeou
 
     CHECK_FALSE(result.success);
     CHECK(result.timeout);
+}
+
+TEST_CASE("Network", "[network][onion_request_router][setup]") {
+    config::SnodePool pool_config = {
+            .cache_directory = std::nullopt,
+            .fallback_snode_pool_path = std::nullopt,
+            .cache_expiration = std::chrono::minutes{5},
+            .cache_min_lifetime = std::chrono::minutes{5},
+            .enforce_subnet_diversity = false,
+            .retry_delay = network::opt::retry_delay{50ms, 200ms},
+            .netid = opt::netid::Target::testnet,
+            .seed_nodes = {},
+            .cache_min_size = 0,
+            .cache_min_swarm_size = 0,
+            .cache_num_nodes_to_use_for_refresh = 3,
+            .cache_min_num_refresh_presence_to_include_node = 2,
+            .cache_node_strike_threshold = 3};
+    config::OnionRequestRouter config = {
+            file_server::DEFAULT_CONFIG,
+            std::nullopt,
+            std::chrono::days{10},
+            opt::netid::Target::testnet,
+            {},
+            network::opt::retry_delay{50ms, 200ms},
+            3,
+            3,
+            10,
+            10min,
+            3,
+            true,
+            true,
+            {{PathCategory::standard, 1}}};
+    auto loop = std::make_shared<oxen::quic::Loop>();
+    auto disk_loop = std::make_shared<oxen::quic::Loop>();
+    auto snode_pool = std::make_shared<TestSnodePool>(pool_config, *loop, *disk_loop);
+    auto transport = std::make_shared<TestTransport>();
+
+    // Setup belongs to make(), never to the constructor: setup's pool callback is guarded by
+    // weak_from_this(), and from inside construction that guard can be captured empty -- a router
+    // that then never becomes ready.  Constructed directly, nothing may be scheduled at all.
+    auto constructed =
+            std::make_shared<OnionRequestRouter>(config, *loop, *disk_loop, snode_pool, transport);
+    CHECK(snode_pool->did_not_call("refresh_if_needed", 200ms));
+    CHECK_FALSE(TestOnionRequestRouter::ready(constructed));
+
+    // make() starts setup once the router is owned; with an empty pool it waits for a refresh,
+    // and the refresh completing makes it ready.
+    auto made = OnionRequestRouter::make(config, *loop, *disk_loop, snode_pool, transport);
+    REQUIRE(snode_pool->called("refresh_if_needed", 1s));
+    REQUIRE(snode_pool->on_refresh_complete);
+    CHECK_FALSE(TestOnionRequestRouter::ready(made));
+    snode_pool->on_refresh_complete();
+    bool became_ready = false;
+    for (int i = 0; i < 100 && !became_ready; ++i) {
+        became_ready = TestOnionRequestRouter::ready(made);
+        if (!became_ready)
+            std::this_thread::sleep_for(10ms);
+    }
+    CHECK(became_ready);
 }
 
 TEST_CASE("Network", "[network][onion_request_router][short_string]") {
