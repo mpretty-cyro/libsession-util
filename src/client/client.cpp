@@ -383,8 +383,9 @@ core::callbacks Client::_core_callbacks() {
     // re-reporting it there.
     core::callbacks cb;
 
-    // Persist first, then notify: a throwing callback is a bug Core can only log, so Client must
-    // never rely on an exception to reject a batch.
+    // Persist first, then notify.  A throw here -- the store failing, say on a busy database -- is
+    // Core's cue to deliver the message again rather than move its cursor past it, so anything that
+    // can throw for good must be handled inside rather than left to escape.
     cb.message_received = [this](core::ReceivedMessage&& msg) {
         _on_message_received(std::move(msg));
     };
@@ -6258,8 +6259,9 @@ void Client::_on_message_received(core::ReceivedMessage&& msg) {
             approved_them = outgoing && contact_changed;
         }
 
-        // Delivery is at-least-once -- the swarm cursor advances per batch, so a crash mid-batch
-        // re-delivers it -- and either unique index is enough to recognise the redelivery.
+        // Delivery is at-least-once -- the swarm cursor advances per batch and stops short of a
+        // message whose store threw, so a crash mid-batch or a failed store re-delivers it -- and
+        // either unique index is enough to recognise the redelivery.
         //
         // The msgid index is what also catches our own message coming back off our own swarm, which
         // the swarm hash cannot: that copy is stored before it has one.  A sender that set no msgid
