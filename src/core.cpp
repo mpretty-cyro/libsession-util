@@ -1395,7 +1395,7 @@ bool Core::_store_pfs_keys(
         std::span<const std::byte, 1184> mlkem768_pub) {
     auto now_s = epoch_seconds(clock_now_s());
     auto conn = db.conn();
-    SQLite::Transaction tx{conn.sql};
+    auto tx = conn.begin_immediate();
 
     bool is_unchanged = conn.prepared_maybe_get<int>(
                                     R"(
