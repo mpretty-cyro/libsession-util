@@ -12,6 +12,8 @@
 #include <session/sodium_array.hpp>
 #include <session/sqlite.hpp>
 
+#include "write_transaction.hpp"
+
 namespace session::core {
 
 namespace log = oxen::log;
@@ -162,7 +164,7 @@ static cleared_b32 generate_seed() {
 
 void Globals::init() {
     auto c = conn();
-    SQLite::Transaction tx{c.sql};
+    auto tx = write_transaction(c);
 
     cleared_b32 seed;
     if (get_blob_to("_seed", seed)) {
@@ -198,7 +200,7 @@ void Globals::_create_account() {
     if (_have_account)
         throw std::logic_error{"This account already has an identity"};
     auto c = conn();
-    SQLite::Transaction tx{c.sql};
+    auto tx = write_transaction(c);
     log::info(cat, "Generated new Session account seed");
     _adopt_seed(generate_seed(), true);
     core.configs.initialise_new_account();
@@ -231,7 +233,7 @@ void Globals::_restore_account(const predefined_seed& seed) {
     if (_have_account)
         throw std::logic_error{"This account already has an identity"};
     auto c = conn();
-    SQLite::Transaction tx{c.sql};
+    auto tx = write_transaction(c);
     _adopt_seed(seed.bytes, true);
     tx.commit();
 }

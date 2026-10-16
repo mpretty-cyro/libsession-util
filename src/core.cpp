@@ -29,6 +29,7 @@
 #include <unordered_set>
 
 #include "core/swarm_request.hpp"
+#include "core/write_transaction.hpp"
 #include "session/config/namespaces.hpp"
 #include "session/core/component.hpp"
 
@@ -1395,7 +1396,7 @@ bool Core::_store_pfs_keys(
         std::span<const std::byte, 1184> mlkem768_pub) {
     auto now_s = epoch_seconds(clock_now_s());
     auto conn = db.conn();
-    SQLite::Transaction tx{conn.sql};
+    auto tx = write_transaction(conn);
 
     bool is_unchanged = conn.prepared_maybe_get<int>(
                                     R"(
@@ -2112,7 +2113,7 @@ CREATE TABLE IF NOT EXISTS migrations_applied (
                 log::info(
                         cat, "Creating {} schema from full_schema", owner.empty() ? "core" : owner);
 
-                SQLite::Transaction tx{conn.sql};
+                auto tx = write_transaction(conn);
 
                 conn.sql.exec(std::string{full_schema});
                 conn.prepared_exec("INSERT INTO migrations_applied (name) VALUES (?)", created_key);
@@ -2142,7 +2143,7 @@ CREATE TABLE IF NOT EXISTS migrations_applied (
             try {
                 log::info(cat, "Applying database schema migration {}", key);
 
-                SQLite::Transaction tx{conn.sql};
+                auto tx = write_transaction(conn);
 
                 apply(conn, *this);
                 conn.prepared_exec("INSERT INTO migrations_applied (name) VALUES (?)", key);
