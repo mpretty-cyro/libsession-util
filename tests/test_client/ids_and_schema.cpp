@@ -85,6 +85,28 @@ TEST_CASE("Client: applies its migrations under the client owner", "[client][sch
     CHECK(has_table("globals"));
 }
 
+TEST_CASE("Client: resetting interrupted sends at start-up reads an index", "[client][schema]") {
+    TempClient c;
+    auto conn = c->core.database().conn();
+    auto plan = [&](const std::string& sql) {
+        SQLite::Statement st{conn.sql, "EXPLAIN QUERY PLAN " + sql};
+        std::string out;
+        while (st.executeStep())
+            out += st.getColumn(3).getText();
+        return out;
+    };
+    // Client::_init's statements, bound parameters and all: a partial index is only used when the
+    // query's WHERE implies the index's, and `x IN (?, ?)` and `x = ?` both imply `x IS NOT NULL`.
+    CHECK(plan("UPDATE messages SET send_state = ? WHERE send_state IN (?, ?)")
+                  .find("USING INDEX messages_send_state") != std::string::npos);
+    CHECK(plan("UPDATE messages SET sync_send_state = ? WHERE sync_send_state IN (?, ?)")
+                  .find("USING INDEX messages_sync_send_state") != std::string::npos);
+    CHECK(plan("UPDATE messages SET send_state = ? WHERE send_state = ?")
+                  .find("USING INDEX messages_send_state") != std::string::npos);
+    CHECK(plan("UPDATE messages SET sync_send_state = ? WHERE sync_send_state = ?")
+                  .find("USING INDEX messages_sync_send_state") != std::string::npos);
+}
+
 TEST_CASE("Client: a message id is never handed out twice", "[client][schema]") {
     TempClient c;
     SenderKeys kept, dropped;
