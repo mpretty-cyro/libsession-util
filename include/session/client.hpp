@@ -1745,15 +1745,13 @@ class Client {
         // hold the job with the caller blocked on it.
         const bool off_loop = !core.loop().inside();
         if (off_loop)
-            _refuse_while_suspended();
+            core.refuse_while_suspended();
         return _jq.call_get([this, off_loop, &f] {
             if (off_loop)
-                _refuse_while_suspended();
+                core.refuse_while_suspended();
             return f();
         });
     }
-    // Throws `sqlite::database_suspended`, logged as critical, while storage is suspended.
-    void _refuse_while_suspended();
 
     // Client's own queue on Core's loop, rather than the loop's shared one, so that work deferred
     // here is *cancelled* if the Client is destroyed with it still outstanding.  Running it instead

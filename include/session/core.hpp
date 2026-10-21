@@ -674,9 +674,10 @@ class Core {
     /// waits for the resume rather than failing: a job already queued, or an answer the network
     /// brings back -- a poll's messages, a send's confirmation, a downloaded file -- carries on
     /// once resumed, and if the process is killed first it is as if the answer never came.  So the
-    /// loop is held up, and a blocking call into Core waits for the resume with it.  Database work
-    /// on any other thread is refused with `sqlite::database_suspended`, and logged as critical: it
-    /// is a bug in whatever forgot to resume.
+    /// loop is held up.  A blocking call into Core from off the loop is refused instead, with
+    /// `sqlite::database_suspended` (see `refuse_while_suspended`), and so is database work on any
+    /// other thread; both are logged as critical, being a bug in whatever forgot to resume.  A call
+    /// taking a callback is queued, and answered once resumed.
     ///
     /// Suspending again while suspended repeats only the database's part: everything on the loop
     /// was done by the first, and the loop may be holding a job that would make a second wait.
@@ -916,10 +917,26 @@ class Core {
     }
     /// Returns by value, deliberately: a reference handed back here would have outlived the job
     /// that produced it, which is the whole hazard this queue exists to close.
+    ///
+    /// From off the loop, refused while storage is suspended (see `suspend_storage`): before it is
+    /// queued, and again when it runs, since a suspend landing in between would otherwise hold the
+    /// job with the caller blocked on it.
     template <typename F>
     auto call_get(F&& f) {
-        return _jq.call_get(std::forward<F>(f));
+        const bool off_loop = !loop().inside();
+        if (off_loop)
+            refuse_while_suspended();
+        return _jq.call_get([this, off_loop, &f] {
+            if (off_loop)
+                refuse_while_suspended();
+            return f();
+        });
     }
+
+    /// Throws `sqlite::database_suspended`, logged as critical, while storage is suspended: what a
+    /// blocking call from off the loop gets then, rather than waiting for a resume its own thread
+    /// may be the one to make.  For a layer on Core with blocking calls of its own, as Client has.
+    void refuse_while_suspended() const;
 
     /// The account database, for a layer built on top of Core that keeps its own tables alongside
     /// Core's — the same layer that supplies a schema_extension to create them.
