@@ -367,28 +367,30 @@ void SnodePool::_refresh_snode_cache(std::optional<std::string> request_id_opt) 
         _snode_refresh_results.clear();
         _refresh_candidate_nodes.clear();
 
-        // Kept until the refresh completes or gives up, so that a retry of this same refresh also
-        // goes to the seed nodes
-        if (std::exchange(_subnet_shortfall, false))
-            _refreshing_for_subnets = true;
+        // A refresh for subnets picks its step here, and may finish without fetching anything: by
+        // adopting the prepackaged pool, or by relaxing diversity.  Its step is kept until the
+        // refresh completes or gives up, so that a retry of this same refresh asks the same way.
+        if (std::exchange(_subnet_shortfall, false) && _subnet_refresh == SubnetRefresh::none &&
+            !_choose_subnet_refresh(request_id))
+            return;
+        const bool for_subnets = _subnet_refresh != SubnetRefresh::none;
 
         // We should only use the routed_fetcher if it exists, passes a connectivity check, and
         // there are enough cached nodes
         const auto cache_insufficient =
                 (_config.cache_num_nodes_to_use_for_refresh > 0 &&
                  _snode_cache.size() < _config.cache_num_nodes_to_use_for_refresh);
-        // Never for a refresh for subnets: the routed fetcher's paths are built from the very cache
-        // in doubt, whose nodes could then drop the request and leave diversity to give way
-        use_routed_fetcher =
-                (cache_insufficient && !_refreshing_for_subnets && _routed_fetcher &&
-                 _routed_fetcher_connectivity_check && (*_routed_fetcher_connectivity_check)());
+        use_routed_fetcher = for_subnets ? _subnet_refresh == SubnetRefresh::routed
+                                         : (cache_insufficient && _routed_fetcher &&
+                                            _routed_fetcher_connectivity_check &&
+                                            (*_routed_fetcher_connectivity_check)());
 
         // We should only refresh using seed nodes if using cached nodes is disabled, there aren't
         // enough cached nodes to refresh from, or the cache spans too few subnets: refreshing that
         // from its own nodes would hand back the same network
         const auto use_seed_nodes =
                 (_config.cache_num_nodes_to_use_for_refresh == 0 || cache_insufficient ||
-                 _refreshing_for_subnets);
+                 for_subnets);
 
         // Seed nodes are trusted so we only need to use a single node when refreshing from them
         num_nodes_for_refresh = (use_seed_nodes ? 1 : _config.cache_num_nodes_to_use_for_refresh);
@@ -420,11 +422,6 @@ void SnodePool::_refresh_snode_cache(std::optional<std::string> request_id_opt) 
                     "[Request {}] Refrshing via routed fetcher using {} nodes.",
                     request_id,
                     num_nodes_for_refresh);
-
-        if (_refreshing_for_subnets && _refresh_candidate_nodes.empty()) {
-            _end_subnet_refresh_without_seed_nodes(request_id, "there are no seed nodes");
-            return;
-        }
 
         // If we (somehow) have no candidate nodes then error and reset the state so we can try
         // again later
@@ -532,35 +529,99 @@ size_t SnodePool::_usable_subnet_count(const std::vector<service_node>& nodes) c
     return subnets.size();
 }
 
-void SnodePool::_end_subnet_refresh_without_seed_nodes(
-        const std::string& request_id, std::string_view why) {
-    // Next best to the seed nodes is the prepackaged pool: nobody on the network can alter it, and
-    // the connection to each node still checks its key, so it being stale only means some of its
-    // nodes are gone.  Worth it only if it spans more subnets than what we have - which it may not,
-    // if it is what the cache was built from.  It is trusted to be a pool of this network, as at
-    // bootstrap: nothing in the file says which (see `opt::fallback_snode_pool_path`).
-    if (auto fallback = _load_fallback_pool(request_id);
-        fallback && _usable_subnet_count(*fallback) > _usable_subnet_count(_snode_cache)) {
+bool SnodePool::_choose_subnet_refresh(const std::string& request_id) {
+    const bool can_route = !_config.seed_nodes.empty() && _routed_fetcher &&
+                           _routed_fetcher_connectivity_check &&
+                           (*_routed_fetcher_connectivity_check)();
+
+    // 1. The seed nodes, routed
+    if (!_routed_subnet_refresh_failed && can_route) {
+        log::info(
+                cat,
+                "[Request {}] Refreshing for subnets from the seed nodes, routed.",
+                request_id);
+        _subnet_refresh = SubnetRefresh::routed;
+        return true;
+    }
+
+    // 2. The prepackaged pool, when routing was not even possible: the same as it having failed
+    if (!_routed_subnet_refresh_failed) {
+        _routed_subnet_refresh_failed = true;
+        if (_adopt_prepackaged_for_subnets(request_id))
+            return false;
+    }
+
+    // 3. The seed nodes, directly
+    if (!_direct_subnet_refresh_failed && !_config.seed_nodes.empty()) {
+        log::info(
+                cat,
+                "[Request {}] Refreshing for subnets from the seed nodes, directly.",
+                request_id);
+        _subnet_refresh = SubnetRefresh::direct;
+        return true;
+    }
+
+    _direct_subnet_refresh_failed = true;
+    _relax_for_subnets(request_id, "there are no seed nodes to ask");
+    return false;
+}
+
+void SnodePool::_subnet_refresh_failed(const std::string& request_id) {
+    const auto failed = std::exchange(_subnet_refresh, SubnetRefresh::none);
+    _current_snode_cache_refresh_id.reset();
+    _snode_refresh_results.clear();
+    _refresh_candidate_nodes.clear();
+
+    if (failed == SubnetRefresh::routed) {
         log::warning(
                 cat,
-                "[Request {}] To refresh a snode cache that spans too few /24 subnets: {}; using "
-                "the prepackaged snode pool, which spans more.",
-                request_id,
-                why);
-        // Still `_refreshing_for_subnets`, so if this falls short too, it gives way
-        _update_cache(request_id, std::move(fallback).value(), true);
+                "[Request {}] No seed node answered over the routed fetcher with a usable pool.",
+                request_id);
+        _routed_subnet_refresh_failed = true;
+        if (_adopt_prepackaged_for_subnets(request_id))
+            return;
+
+        // On to the seed nodes directly, as a fresh refresh: the callbacks waiting on this one are
+        // still queued for it
+        _subnet_shortfall = true;
+        _refresh_snode_cache();
         return;
     }
 
+    _direct_subnet_refresh_failed = true;
+    _relax_for_subnets(request_id, "no seed node answered directly with a usable pool");
+}
+
+bool SnodePool::_adopt_prepackaged_for_subnets(const std::string& request_id) {
+    // Nobody on the network can alter the prepackaged pool, and the connection to each node still
+    // checks its key, so it being stale only means some of its nodes are gone.  Worth it only if it
+    // spans more subnets than what we have - which it may not, if it is what the cache was built
+    // from.  It is trusted to be a pool of this network, as at bootstrap: nothing in the file says
+    // which (see `opt::fallback_snode_pool_path`).
+    auto fallback = _load_fallback_pool(request_id);
+    if (!fallback || _usable_subnet_count(*fallback) <= _usable_subnet_count(_snode_cache))
+        return false;
+
+    log::warning(
+            cat,
+            "[Request {}] Using the prepackaged snode pool, which spans more /24 subnets than the "
+            "cache.",
+            request_id);
+    _update_cache(request_id, std::move(*fallback), CacheSource::prepackaged);
+    return true;
+}
+
+void SnodePool::_relax_for_subnets(const std::string& request_id, std::string_view why) {
     // The cache we have is still usable, only not diverse enough, so rather than wait indefinitely,
     // use it with as little subnet sharing as it allows
     log::warning(
             cat,
-            "[Request {}] To refresh a snode cache that spans too few /24 subnets: {}; allowing "
-            "nodes to share subnets, as few as possible, until the next refresh.",
+            "[Request {}] The snode cache spans too few /24 subnets and {}; allowing nodes to "
+            "share "
+            "subnets, as few as possible, until the next refresh.",
             request_id,
             why);
-    _refreshing_for_subnets = false;
+    _subnet_refresh = SubnetRefresh::none;
     _subnet_diversity_relaxed = true;
     _current_snode_cache_refresh_id.reset();
     _snode_refresh_results.clear();
@@ -585,10 +646,8 @@ void SnodePool::_launch_next_refresh_request(
 
         const auto target_request_id = "{}-{}"_format(request_id, index);
 
-        if (_refresh_candidate_nodes.empty() && refreshing_from_seed_nodes &&
-            _refreshing_for_subnets) {
-            _end_subnet_refresh_without_seed_nodes(
-                    request_id, "no seed node answered with a usable pool");
+        if (_refresh_candidate_nodes.empty() && _subnet_refresh != SubnetRefresh::none) {
+            _subnet_refresh_failed(request_id);
             return;
         }
 
@@ -606,7 +665,7 @@ void SnodePool::_launch_next_refresh_request(
                             cat,
                             "[Request {}] Ran out of seed nodes for refresh, using fallback cache.",
                             request_id);
-                    _update_cache(request_id, std::move(*fallback), true);
+                    _update_cache(request_id, std::move(*fallback), CacheSource::prepackaged);
                     return;
                 }
 
@@ -640,7 +699,7 @@ void SnodePool::_launch_next_refresh_request(
                     cat, "[Request {}] No fetcher available, aborting refresh.", target_request_id);
             _current_snode_cache_refresh_id.reset();
             _refresh_candidate_nodes.clear();
-            _refreshing_for_subnets = false;
+            _subnet_refresh = SubnetRefresh::none;
             return;
         }
 
@@ -926,17 +985,20 @@ void SnodePool::_on_refresh_complete(
         }
 
         // Update the cache with the combined nodes
-        // The seed nodes are trusted, so a pool from them is one to judge diversity by rather
-        // than one to vet
-        _update_cache(refresh_id, std::move(nodes), refreshing_from_seed_nodes);
+        // From the seed nodes, routed or not, it is the network as they see it: routing can only
+        // drop or delay a reply encrypted for the seed node, not change it
+        _update_cache(
+                refresh_id,
+                std::move(nodes),
+                refreshing_from_seed_nodes ? CacheSource::seed_nodes : CacheSource::other);
     });
 }
 
 void SnodePool::_update_cache(
-        std::string refresh_id, std::vector<service_node> nodes, bool from_trusted_source) {
+        std::string refresh_id, std::vector<service_node> nodes, CacheSource source) {
     // Use 'call_get' to force this to be synchronous; a plain 'call' would queue when we aren't
     // already on the loop thread, and the captured `nodes` reference would dangle
-    _jq.call_get([this, refresh_id, &nodes, from_trusted_source] {
+    _jq.call_get([this, refresh_id, &nodes, source] {
         // Shuffle the nodes so we don't have a specific order
         std::ranges::shuffle(nodes, csrng);
         log::info(
@@ -958,12 +1020,17 @@ void SnodePool::_update_cache(
         _refresh_candidate_nodes.clear();
         _snode_cache_refresh_failure_count = 0;
 
-        // A new cache is judged afresh: diversity is enforced again, and given up only if this
-        // cache, too, cannot support it and came from a trusted source
-        _cache_from_trusted_source = from_trusted_source;
-        _refreshing_for_subnets = false;
+        // A new cache is judged afresh: diversity is enforced again.  Only adopting the prepackaged
+        // pool is itself a step of a refresh for subnets, after which the seed nodes directly are
+        // still to try; any other cache starts the steps over.
+        _cache_source = source;
+        _subnet_refresh = SubnetRefresh::none;
         _subnet_diversity_relaxed = false;
         _subnet_shortfall = false;
+        if (source != CacheSource::prepackaged) {
+            _routed_subnet_refresh_failed = false;
+            _direct_subnet_refresh_failed = false;
+        }
 
         _disk_loop.call([path = _snode_cache_file_path, cache = _snode_cache] {
             SnodePool::_perform_cache_write(path, cache);
@@ -1042,7 +1109,9 @@ void SnodePool::clear_cache() {
         _all_swarms = {};
         _swarm_cache = {};
         _subnet_shortfall = false;
-        _cache_from_trusted_source = false;
+        _cache_source = CacheSource::other;
+        _routed_subnet_refresh_failed = false;
+        _direct_subnet_refresh_failed = false;
         _subnet_diversity_relaxed = false;
 
         _disk_loop.call([path = _snode_cache_file_path] { SnodePool::_clear_disk_cache(path); });
@@ -1284,19 +1353,21 @@ std::vector<service_node> SnodePool::get_unused_nodes(
         if (result.size() >= count)
             return result;
 
-        // Short only because of subnet diversity: refresh from the seed nodes first, and give way
-        // only for a cache that came from them or the prepackaged pool, or when neither can help
-        // (see `_end_subnet_refresh_without_seed_nodes`)
+        // Short only because of subnet diversity: refresh for it (see `_choose_subnet_refresh`),
+        // and give way only for a cache that is the seed nodes' own list, or once every way of
+        // reaching them has failed
         if (!_subnet_diversity_relaxed) {
             if (auto shared = pick(any_share); shared.size() >= count) {
-                if (_cache_from_trusted_source) {
+                if (_cache_source == CacheSource::seed_nodes || _direct_subnet_refresh_failed) {
                     log::warning(
                             cat,
                             "The snode cache spans too few /24 subnets for {} nodes from distinct "
-                            "subnets, even refreshed from a trusted source; allowing nodes to "
-                            "share "
-                            "subnets, as few as possible, until the next refresh.",
-                            count);
+                            "subnets, {}; allowing nodes to share subnets, as few as possible, "
+                            "until the next refresh.",
+                            count,
+                            (_cache_source == CacheSource::seed_nodes
+                                     ? "as the seed nodes list the network"
+                                     : "and the seed nodes cannot be reached"));
                     _subnet_diversity_relaxed = true;
                     return shared;
                 }
@@ -1305,7 +1376,7 @@ std::vector<service_node> SnodePool::get_unused_nodes(
                     log::warning(
                             cat,
                             "Could only find {}/{} unused nodes in distinct /24 subnets; "
-                            "refreshing from the seed nodes.",
+                            "refreshing for more.",
                             result.size(),
                             count);
                 _subnet_shortfall = true;

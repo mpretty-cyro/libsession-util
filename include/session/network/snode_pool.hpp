@@ -143,19 +143,25 @@ class SnodePool : public std::enable_shared_from_this<SnodePool> {
     std::vector<std::function<void()>> _after_snode_cache_refresh;
 
     // Subnet diversity, when the cache holds enough usable nodes but too few distinct /24 subnets
-    // to fill a request from them (see `get_unused_nodes`).  The pool first refreshes from the
-    // seed nodes, which are trusted and return the whole network, or if they cannot be reached
-    // from the prepackaged pool if that spans more subnets.  Only if the result still has too few
-    // does it relax diversity, sharing as few subnets as it can, and only until the next refresh
-    // replaces the cache.
-    //
-    // `_subnet_shortfall` asks for that seed refresh, `_refreshing_for_subnets` marks the refresh
-    // in progress as being it, and `_cache_from_trusted_source` marks a cache from the seed nodes
-    // or the prepackaged pool, by whatever refresh, as one to relax diversity for if it falls
-    // short rather than to vet.
+    // to fill a request from them (see `get_unused_nodes`).  A refresh for it tries, in order,
+    // stopping at the first that gives a pool to judge by:
+    //  1. the seed nodes over the routed fetcher: authentic, since routing can only drop or delay a
+    //     reply encrypted for them, and private, but blockable by the very nodes in doubt;
+    //  2. the prepackaged pool, if it spans more subnets than the cache: trusted, but stale;
+    //  3. the seed nodes directly: authentic, but they see the client's address.
+    // A list from the seed nodes that is still too cramped is the network as it is, so diversity
+    // then relaxes - sharing as few subnets as it can, and only until the next refresh - as it does
+    // once every step has failed.
+    enum class CacheSource : uint8_t { other, prepackaged, seed_nodes };
+    enum class SubnetRefresh : uint8_t { none, routed, direct };
+    CacheSource _cache_source = CacheSource::other;
+    // A request came up short for subnets, and a refresh is wanted for it
     bool _subnet_shortfall = false;
-    bool _refreshing_for_subnets = false;
-    bool _cache_from_trusted_source = false;
+    // The refresh in progress is for subnets, and which step
+    SubnetRefresh _subnet_refresh = SubnetRefresh::none;
+    // Steps already tried since a cache last came from anywhere but the prepackaged pool
+    bool _routed_subnet_refresh_failed = false;
+    bool _direct_subnet_refresh_failed = false;
     bool _subnet_diversity_relaxed = false;
 
     /// This pool's own jobs, rather than the loop's shared queue, so that ~SnodePool can take them
@@ -178,10 +184,13 @@ class SnodePool : public std::enable_shared_from_this<SnodePool> {
     // Refresh functions
     void _refresh_snode_cache(std::optional<std::string> request_id = std::nullopt);
     void _run_after_refresh_callbacks();
-    // Ends a refresh for subnet diversity that the seed nodes could not serve, `why`: with the
-    // prepackaged pool if it spans more subnets than the cache, otherwise by relaxing diversity
-    void _end_subnet_refresh_without_seed_nodes(
-            const std::string& request_id, std::string_view why);
+    // The steps of a refresh for subnets (see `_cache_source`).  `_choose_subnet_refresh` picks
+    // the next fetch, or returns false having ended the refresh without one;
+    // `_subnet_refresh_failed` moves on from a fetch that got no usable pool.
+    bool _choose_subnet_refresh(const std::string& request_id);
+    void _subnet_refresh_failed(const std::string& request_id);
+    bool _adopt_prepackaged_for_subnets(const std::string& request_id);
+    void _relax_for_subnets(const std::string& request_id, std::string_view why);
     // The prepackaged pool at `fallback_snode_pool_path`, or nullopt if there is none or it cannot
     // be used
     std::optional<std::vector<service_node>> _load_fallback_pool(const std::string& request_id);
@@ -205,9 +214,7 @@ class SnodePool : public std::enable_shared_from_this<SnodePool> {
             const bool refreshing_from_seed_nodes,
             const bool use_direct_fetcher,
             const uint8_t total_requests);
-    // `from_trusted_source`: the seed nodes or the prepackaged pool, rather than other nodes
-    void _update_cache(
-            std::string refresh_id, std::vector<service_node> nodes, bool from_trusted_source);
+    void _update_cache(std::string refresh_id, std::vector<service_node> nodes, CacheSource source);
 };
 
 }  // namespace session::network

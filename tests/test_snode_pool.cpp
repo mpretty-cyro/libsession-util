@@ -87,8 +87,8 @@ class TestSnodePool : public SnodePool {
 
     // Called from the test thread, so this also covers `_update_cache` being entered from off the
     // loop thread
-    void update_cache(std::vector<service_node> nodes, bool from_trusted_source = false) {
-        _update_cache("test", std::move(nodes), from_trusted_source);
+    void update_cache(std::vector<service_node> nodes) {
+        _update_cache("test", std::move(nodes), CacheSource::other);
     }
 
     // Puts a swarm straight into the cache so get_swarm answers from it rather than resolving one.
@@ -635,21 +635,18 @@ TEST_CASE(
     }
 }
 
-TEST_CASE(
-        "SnodePool: with the seed nodes out of reach, a cache with too few subnets is replaced by "
-        "a prepackaged pool that spans more",
-        "[network][subnets]") {
-    auto seed = nodes_in_subnets(1, 1, 99);
-    auto cramped = nodes_in_subnets(20, 2, 1);
-    auto prepackaged_nodes = nodes_in_subnets(25, 25, 4);
+namespace {
 
-    auto dir = std::filesystem::temp_directory_path() /
-               "snode-pool-prepackaged-{}"_format(random::unique_id("t"));
-    std::filesystem::create_directories(dir);
-    auto path = dir / "service_nodes.json";
-    {
+// A prepackaged pool of `nodes` in its own temporary directory, removed with it
+struct PrepackagedPool {
+    std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                "snode-pool-prepackaged-{}"_format(random::unique_id("t"));
+    std::filesystem::path path = dir / "service_nodes.json";
+
+    explicit PrepackagedPool(const std::vector<service_node>& nodes) {
+        std::filesystem::create_directories(dir);
         nlohmann::json states = nlohmann::json::array();
-        for (const auto& node : prepackaged_nodes)
+        for (const auto& node : nodes)
             states.push_back(
                     {{"pubkey_ed25519", oxenc::to_hex(node.view_remote_key())},
                      {"public_ip", node.ip.to_string()},
@@ -659,32 +656,200 @@ TEST_CASE(
                      {"requested_unlock_height", 0}});
         std::ofstream{path} << nlohmann::json{{"height", 1}, {"service_node_states", states}};
     }
+    ~PrepackagedPool() {
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+    }
+};
+
+void answer(
+        oxen::quic::Loop& loop,
+        std::pair<Request, network_response_callback_t>& request,
+        const std::vector<service_node>& nodes) {
+    auto bin = to_snode_cache_bin(nodes);
+    loop.call_get([&] {
+        request.second(
+                true,
+                false,
+                200,
+                {},
+                std::string{reinterpret_cast<const char*>(bin.data()), bin.size()});
+    });
+    loop.call_get([] {});
+}
+
+void fail(oxen::quic::Loop& loop, std::pair<Request, network_response_callback_t>& request) {
+    loop.call_get([&] { request.second(false, true, 0, {}, std::nullopt); });
+}
+
+bool none_held(HeldRefreshes& held) {
+    std::lock_guard lock{held.mutex};
+    return held.requests.empty();
+}
+
+const service_node& destination(const std::pair<Request, network_response_callback_t>& request) {
+    return std::get<service_node>(request.first.destination);
+}
+
+}  // namespace
+
+TEST_CASE(
+        "SnodePool: a refresh for subnets asks the seed nodes over the routed fetcher first",
+        "[network][subnets]") {
+    auto seed = nodes_in_subnets(1, 1, 99);
+    auto cramped = nodes_in_subnets(20, 1, 1);
+
+    SECTION("whose list, still too cramped, is the network as it is") {
+        auto loop = std::make_shared<oxen::quic::Loop>();
+        auto disk_loop = std::make_shared<oxen::quic::Loop>();
+        HeldRefreshes direct, routed;
+        PrepackagedPool prepackaged{nodes_in_subnets(25, 25, 4)};
+        auto pool = std::make_shared<TestSnodePool>(
+                subnet_config(seed, prepackaged.path), *loop, *disk_loop, direct.fetcher());
+        pool->set_routed_fetcher(routed.fetcher(), [] { return true; });
+        pool->reset_state_with_fresh_cache(cramped);
+        pool->real_refresh = true;
+
+        CHECK(pool->get_unused_nodes(3).size() == 1);
+        std::atomic<int> refreshed{0};
+        pool->refresh_if_needed({}, [&] { refreshed++; });
+        auto request = routed.next();
+        REQUIRE(request);
+        CHECK(destination(*request).remote_pubkey == seed[0].remote_pubkey);
+        answer(*loop, *request, nodes_in_subnets(20, 2, 5));
+        CHECK(refreshed == 1);
+
+        // Neither the stale prepackaged pool nor the seed nodes directly could say more
+        CHECK(pool->get_unused_nodes(3).size() == 3);
+        CHECK(pool->subnet_diversity_relaxed());
+        CHECK(pool->size() == 20);
+        CHECK(none_held(direct));
+    }
+
+    SECTION("then, if no seed node answers, the prepackaged pool if it spans more") {
+        auto loop = std::make_shared<oxen::quic::Loop>();
+        auto disk_loop = std::make_shared<oxen::quic::Loop>();
+        HeldRefreshes direct, routed;
+        PrepackagedPool prepackaged{nodes_in_subnets(25, 25, 4)};
+        auto pool = std::make_shared<TestSnodePool>(
+                subnet_config(seed, prepackaged.path), *loop, *disk_loop, direct.fetcher());
+        pool->set_routed_fetcher(routed.fetcher(), [] { return true; });
+        pool->reset_state_with_fresh_cache(cramped);
+        pool->real_refresh = true;
+
+        CHECK(pool->get_unused_nodes(3).size() == 1);
+        std::atomic<int> refreshed{0};
+        pool->refresh_if_needed({}, [&] { refreshed++; });
+        auto request = routed.next();
+        REQUIRE(request);
+        fail(*loop, *request);
+        for (int i = 0; i < 200 && refreshed == 0; ++i)
+            std::this_thread::sleep_for(10ms);
+        CHECK(refreshed == 1);
+
+        CHECK(pool->size() == 25);
+        CHECK(distinct_subnets(pool->get_unused_nodes(3)) == 3);
+        CHECK_FALSE(pool->subnet_diversity_relaxed());
+        CHECK(none_held(direct));
+    }
+
+    SECTION("then the seed nodes directly, when the prepackaged pool is no help") {
+        auto loop = std::make_shared<oxen::quic::Loop>();
+        auto disk_loop = std::make_shared<oxen::quic::Loop>();
+        HeldRefreshes direct, routed;
+        auto pool = std::make_shared<TestSnodePool>(
+                subnet_config(seed), *loop, *disk_loop, direct.fetcher());
+        pool->set_routed_fetcher(routed.fetcher(), [] { return true; });
+        pool->reset_state_with_fresh_cache(cramped);
+        pool->real_refresh = true;
+
+        CHECK(pool->get_unused_nodes(3).size() == 1);
+        std::atomic<int> refreshed{0};
+        pool->refresh_if_needed({}, [&] { refreshed++; });
+        auto routed_request = routed.next();
+        REQUIRE(routed_request);
+        fail(*loop, *routed_request);
+
+        auto direct_request = direct.next();
+        REQUIRE(direct_request);
+        CHECK(destination(*direct_request).remote_pubkey == seed[0].remote_pubkey);
+        CHECK(refreshed == 0);
+        answer(*loop, *direct_request, nodes_in_subnets(30, 30, 2));
+        CHECK(refreshed == 1);
+        CHECK(distinct_subnets(pool->get_unused_nodes(3)) == 3);
+        CHECK_FALSE(pool->subnet_diversity_relaxed());
+    }
+
+    SECTION("and the seed nodes directly after a prepackaged pool that is better but still short") {
+        auto loop = std::make_shared<oxen::quic::Loop>();
+        auto disk_loop = std::make_shared<oxen::quic::Loop>();
+        HeldRefreshes direct, routed;
+        // Two subnets beat the cache's one, but still cannot give three nodes from distinct ones
+        PrepackagedPool prepackaged{nodes_in_subnets(20, 2, 4)};
+        auto pool = std::make_shared<TestSnodePool>(
+                subnet_config(seed, prepackaged.path), *loop, *disk_loop, direct.fetcher());
+        pool->set_routed_fetcher(routed.fetcher(), [] { return true; });
+        pool->reset_state_with_fresh_cache(cramped);
+        pool->real_refresh = true;
+
+        CHECK(pool->get_unused_nodes(3).size() == 1);
+        std::atomic<int> refreshed{0};
+        pool->refresh_if_needed({}, [&] { refreshed++; });
+        auto routed_request = routed.next();
+        REQUIRE(routed_request);
+        fail(*loop, *routed_request);
+        for (int i = 0; i < 200 && refreshed == 0; ++i)
+            std::this_thread::sleep_for(10ms);
+        REQUIRE(refreshed == 1);
+        CHECK(pool->size() == 20);
+
+        // A stale pool is not evidence enough to give way: the seed nodes are asked, directly
+        CHECK(pool->get_unused_nodes(3).size() == 2);
+        CHECK_FALSE(pool->subnet_diversity_relaxed());
+        pool->refresh_if_needed({}, [&] { refreshed++; });
+        auto direct_request = direct.next();
+        REQUIRE(direct_request);
+        CHECK(none_held(routed));
+        fail(*loop, *direct_request);
+        for (int i = 0; i < 200 && refreshed == 1; ++i)
+            std::this_thread::sleep_for(10ms);
+        CHECK(refreshed == 2);
+        CHECK(pool->subnet_diversity_relaxed());
+        CHECK(pool->get_unused_nodes(3).size() == 3);
+    }
+}
+
+TEST_CASE(
+        "SnodePool: without a routed fetcher, a cache with too few subnets is replaced by a "
+        "prepackaged pool that spans more before the seed nodes are asked directly",
+        "[network][subnets]") {
+    auto seed = nodes_in_subnets(1, 1, 99);
+    auto cramped = nodes_in_subnets(20, 2, 1);
+    auto prepackaged_nodes = nodes_in_subnets(25, 25, 4);
+    PrepackagedPool prepackaged{prepackaged_nodes};
 
     auto loop = std::make_shared<oxen::quic::Loop>();
     auto disk_loop = std::make_shared<oxen::quic::Loop>();
     HeldRefreshes held;
     auto pool = std::make_shared<TestSnodePool>(
-            subnet_config(seed, path), *loop, *disk_loop, held.fetcher());
+            subnet_config(seed, prepackaged.path), *loop, *disk_loop, held.fetcher());
     pool->reset_state_with_fresh_cache(cramped);
     pool->real_refresh = true;
 
     CHECK(pool->get_unused_nodes(3).size() == 2);
     std::atomic<int> refreshed{0};
     pool->refresh_if_needed({}, [&] { refreshed++; });
-    auto request = held.next();
-    REQUIRE(request);
-    loop->call_get([&] { request->second(false, true, 0, {}, std::nullopt); });
     for (int i = 0; i < 200 && refreshed == 0; ++i)
         std::this_thread::sleep_for(10ms);
     CHECK(refreshed == 1);
+    // Taken before the seed nodes are asked directly, which would show them the client's address
+    CHECK(none_held(held));
 
     CHECK(pool->size() == prepackaged_nodes.size());
     auto nodes = pool->get_unused_nodes(3);
     CHECK(nodes.size() == 3);
     CHECK(distinct_subnets(nodes) == 3);
     CHECK_FALSE(pool->subnet_diversity_relaxed());
-
-    std::filesystem::remove_all(dir);
 }
 
 TEST_CASE(
@@ -762,33 +927,6 @@ TEST_CASE(
     CHECK(refreshed == 1);
     CHECK(pool->subnet_diversity_relaxed());
     CHECK(distinct_subnets(pool->get_unused_nodes(3)) == 2);
-}
-
-TEST_CASE(
-        "SnodePool: a refresh for subnets goes to the seed nodes directly, not over paths built "
-        "from the cache in doubt",
-        "[network][subnets]") {
-    auto seed = nodes_in_subnets(1, 1, 99);
-    auto cramped = nodes_in_subnets(20, 2, 1);
-
-    auto loop = std::make_shared<oxen::quic::Loop>();
-    auto disk_loop = std::make_shared<oxen::quic::Loop>();
-    HeldRefreshes direct, routed;
-    auto pool = std::make_shared<TestSnodePool>(
-            subnet_config(seed), *loop, *disk_loop, direct.fetcher());
-    pool->set_routed_fetcher(routed.fetcher(), [] { return true; });
-    pool->reset_state_with_fresh_cache(cramped);
-    pool->real_refresh = true;
-
-    CHECK(pool->get_unused_nodes(3).size() == 2);
-    pool->refresh_if_needed({}, [] {});
-    auto request = direct.next();
-    REQUIRE(request);
-    REQUIRE(std::holds_alternative<service_node>(request->first.destination));
-    CHECK(std::get<service_node>(request->first.destination).remote_pubkey ==
-          seed[0].remote_pubkey);
-    std::lock_guard lock{routed.mutex};
-    CHECK(routed.requests.empty());
 }
 
 TEST_CASE(
