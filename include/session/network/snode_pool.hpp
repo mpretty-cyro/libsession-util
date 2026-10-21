@@ -150,10 +150,12 @@ class SnodePool : public std::enable_shared_from_this<SnodePool> {
     // replaces the cache.
     //
     // `_subnet_shortfall` asks for that seed refresh, `_refreshing_for_subnets` marks the refresh
-    // in progress as being it, and `_cache_from_subnet_refresh` marks the cache as its result.
+    // in progress as being it, and `_cache_from_trusted_source` marks a cache from the seed nodes
+    // or the prepackaged pool, by whatever refresh, as one to relax diversity for if it falls
+    // short rather than to vet.
     bool _subnet_shortfall = false;
     bool _refreshing_for_subnets = false;
-    bool _cache_from_subnet_refresh = false;
+    bool _cache_from_trusted_source = false;
     bool _subnet_diversity_relaxed = false;
 
     /// This pool's own jobs, rather than the loop's shared queue, so that ~SnodePool can take them
@@ -203,7 +205,9 @@ class SnodePool : public std::enable_shared_from_this<SnodePool> {
             const bool refreshing_from_seed_nodes,
             const bool use_direct_fetcher,
             const uint8_t total_requests);
-    void _update_cache(std::string refresh_id, std::vector<service_node> nodes);
+    // `from_trusted_source`: the seed nodes or the prepackaged pool, rather than other nodes
+    void _update_cache(
+            std::string refresh_id, std::vector<service_node> nodes, bool from_trusted_source);
 };
 
 }  // namespace session::network

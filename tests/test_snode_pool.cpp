@@ -87,7 +87,9 @@ class TestSnodePool : public SnodePool {
 
     // Called from the test thread, so this also covers `_update_cache` being entered from off the
     // loop thread
-    void update_cache(std::vector<service_node> nodes) { _update_cache("test", std::move(nodes)); }
+    void update_cache(std::vector<service_node> nodes, bool from_trusted_source = false) {
+        _update_cache("test", std::move(nodes), from_trusted_source);
+    }
 
     // Puts a swarm straight into the cache so get_swarm answers from it rather than resolving one.
     void seed_swarm(const x25519_pubkey& pubkey, std::vector<service_node> nodes) {
@@ -760,4 +762,70 @@ TEST_CASE(
     CHECK(refreshed == 1);
     CHECK(pool->subnet_diversity_relaxed());
     CHECK(distinct_subnets(pool->get_unused_nodes(3)) == 2);
+}
+
+TEST_CASE(
+        "SnodePool: a refresh for subnets goes to the seed nodes directly, not over paths built "
+        "from the cache in doubt",
+        "[network][subnets]") {
+    auto seed = nodes_in_subnets(1, 1, 99);
+    auto cramped = nodes_in_subnets(20, 2, 1);
+
+    auto loop = std::make_shared<oxen::quic::Loop>();
+    auto disk_loop = std::make_shared<oxen::quic::Loop>();
+    HeldRefreshes direct, routed;
+    auto pool = std::make_shared<TestSnodePool>(
+            subnet_config(seed), *loop, *disk_loop, direct.fetcher());
+    pool->set_routed_fetcher(routed.fetcher(), [] { return true; });
+    pool->reset_state_with_fresh_cache(cramped);
+    pool->real_refresh = true;
+
+    CHECK(pool->get_unused_nodes(3).size() == 2);
+    pool->refresh_if_needed({}, [] {});
+    auto request = direct.next();
+    REQUIRE(request);
+    REQUIRE(std::holds_alternative<service_node>(request->first.destination));
+    CHECK(std::get<service_node>(request->first.destination).remote_pubkey ==
+          seed[0].remote_pubkey);
+    std::lock_guard lock{routed.mutex};
+    CHECK(routed.requests.empty());
+}
+
+TEST_CASE(
+        "SnodePool: a cache bootstrapped from the seed nodes is not refreshed from them again "
+        "for its subnets",
+        "[network][subnets]") {
+    // Testnet: the bootstrap itself comes from the seed nodes and is as cramped as the network is,
+    // so asking them again would return the same.
+    auto seed = nodes_in_subnets(1, 1, 99);
+
+    auto loop = std::make_shared<oxen::quic::Loop>();
+    auto disk_loop = std::make_shared<oxen::quic::Loop>();
+    HeldRefreshes held;
+    auto pool =
+            std::make_shared<TestSnodePool>(subnet_config(seed), *loop, *disk_loop, held.fetcher());
+    pool->real_refresh = true;
+
+    std::atomic<int> refreshed{0};
+    pool->refresh_if_needed({}, [&] { refreshed++; });
+    auto bootstrap = held.next();
+    REQUIRE(bootstrap);
+    auto bin = to_snode_cache_bin(nodes_in_subnets(20, 2, 6));
+    loop->call_get([&] {
+        bootstrap->second(
+                true,
+                false,
+                200,
+                {},
+                std::string{reinterpret_cast<const char*>(bin.data()), bin.size()});
+    });
+    loop->call_get([] {});
+    REQUIRE(refreshed == 1);
+
+    auto nodes = pool->get_unused_nodes(3);
+    CHECK(nodes.size() == 3);
+    CHECK(pool->subnet_diversity_relaxed());
+    std::this_thread::sleep_for(100ms);
+    std::lock_guard lock{held.mutex};
+    CHECK(held.requests.empty());
 }
