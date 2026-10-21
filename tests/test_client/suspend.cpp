@@ -1,7 +1,5 @@
 #include <sqlite3.h>
 
-#include <latch>
-
 #include "common.hpp"
 
 // ── The suspend contract ────────────────────────────────────────────────────────────────────────
@@ -326,13 +324,15 @@ TEST_CASE("Core: destroyed while suspended with a job held and no Client", "[cor
     auto core = std::make_unique<TempCore>();
     (*core)->suspend_storage(1s);
 
-    std::latch posted{1};
+    // Spun on rather than a latch, which the macOS deployment target does not have
+    std::atomic<bool> posted{false};
     (*core)->loop().call([&] {
-        posted.count_down();
+        posted = true;
         // Held: Core's loop waits here for the resume
         (*core)->database().conn();
     });
-    posted.wait();
+    while (!posted) {
+    }
     std::this_thread::sleep_for(50ms);
 
     auto& db = (*core)->database();
