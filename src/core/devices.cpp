@@ -30,7 +30,6 @@
 #include <stdexcept>
 
 #include "../internal-util.hpp"
-#include "write_transaction.hpp"
 
 namespace fmt {
 
@@ -103,7 +102,7 @@ void Devices::establish_group() {
     active_account_keys();  // Mints the account's first shared seed if there is not one yet.
 
     auto c = conn();
-    auto tx = write_transaction(c);
+    auto tx = c.begin_immediate();
 
     // `broadcast_needed` rather than a bumped seqno is what marks this for pushing: seqno tracks
     // changes to our *info*, and nothing about our info has changed -- we have gone from being no
@@ -184,7 +183,7 @@ Devices::DeviceKeys Devices::rotate_device_keys() {
     auto keys = keys_from_seed<DeviceKeys>(seed);
 
     auto c = conn();
-    auto tx = write_transaction(c);
+    auto tx = c.begin_immediate();
 
     auto now = epoch_seconds(clock_now_s());
     c.prepared_exec("INSERT INTO device_privkeys (created, seed) VALUES (?, ?)", now, seed);
@@ -250,7 +249,7 @@ std::vector<Devices::DeviceKeys> Devices::active_device_keys() {
 std::vector<Devices::AccountKeys> Devices::active_account_keys(
         std::optional<std::span<const std::byte, 2>> key_indicator) {
     auto c = conn();
-    auto tx = write_transaction(c);
+    auto tx = c.begin_immediate();
 
     c.prepared_exec(
             "DELETE FROM device_account_keys WHERE rotated < ?",
@@ -433,8 +432,8 @@ device::map Devices::devices(
         return {};
 
     auto c = conn();
-    // Deferred, not write_transaction(): this only reads, for one consistent snapshot.
-    SQLite::Transaction tx{c.sql};
+    // Deferred, not begin_immediate(): this only reads, for one consistent snapshot.
+    auto tx = c.begin();
     device::map devs;
 
     std::string query =
@@ -526,7 +525,7 @@ void Devices::_update_info(const device::Info& info) {
     auto ver = info.version[0] * 1000000 + info.version[1] * 1000 + info.version[2];
 
     auto c = conn();
-    auto tx = write_transaction(c);
+    auto tx = c.begin_immediate();
 
     auto dev_id = c.prepared_get<int64_t>(
             R"(INSERT INTO devices
@@ -1100,7 +1099,7 @@ void Devices::receive_device_group_message(std::span<const std::byte> data) {
     }
 
     auto c = conn();
-    auto tx = write_transaction(c);
+    auto tx = c.begin_immediate();
 
     // Merge incoming account keys.  New seeds are inserted and the rotation trigger applies
     // tie-breaking: latest created wins (smallest seed as tiebreaker), so concurrent rotations
@@ -1442,7 +1441,7 @@ void Devices::receive_link_request(std::span<const std::byte> data) {
         return;
     }
 
-    auto tx = write_transaction(c);
+    auto tx = c.begin_immediate();
 
     auto dev_id = upsert_device_info(c, info);
     if (!dev_id) {
@@ -1674,7 +1673,7 @@ Devices::NeedsPush Devices::needs_push() {
 
 void Devices::mark_device_group_pushed(int64_t seqno) {
     auto c = conn();
-    auto tx = write_transaction(c);
+    auto tx = c.begin_immediate();
     c.prepared_exec("UPDATE devices SET pushed_seqno = ? WHERE unique_id = ?", seqno, self_id);
     c.prepared_exec("UPDATE devices SET broadcast_needed = 0");
     c.prepared_exec("UPDATE device_account_keys SET distributed = 1");
@@ -1683,8 +1682,8 @@ void Devices::mark_device_group_pushed(int64_t seqno) {
 
 std::optional<std::chrono::system_clock::time_point> Devices::next_account_rotation() {
     auto c = conn();
-    // Deferred, not write_transaction(): this only reads, for one consistent snapshot.
-    SQLite::Transaction tx{c.sql};
+    // Deferred, not begin_immediate(): this only reads, for one consistent snapshot.
+    auto tx = c.begin();
 
     if (!c.prepared_maybe_get<int>(
                 "SELECT 1 FROM devices WHERE unique_id = ? AND state = ?",

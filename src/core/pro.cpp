@@ -6,7 +6,6 @@
 
 #include "SQLiteCpp/Transaction.h"
 #include "session/sqlite.hpp"
-#include "write_transaction.hpp"
 
 namespace session::core {
 
@@ -40,7 +39,7 @@ void Pro::update_revocations(
     auto now = session::clock_now_s().time_since_epoch().count();
 
     auto c = conn();
-    auto tx = write_transaction(c);
+    auto tx = c.begin_immediate();
 
     // Upsert each listed revocation, (re)setting its last-seen time to now.
     for (auto st =
