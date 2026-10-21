@@ -106,6 +106,10 @@ class Configs : public detail::CoreComponent {
     void _push_if_due();
     void _send_push();
 
+    // Whether a push's answer has to be left unconfirmed because storage is suspended (logging
+    // that it is).
+    bool _unconfirmable();
+
     // Applies a config push's answer.  Split out from the callback that receives it because that
     // one arrives on the Network's own loop, and all of this is Configs' state: the callback
     // checks it is still alive and hands this to Core's queue.

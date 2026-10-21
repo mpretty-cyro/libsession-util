@@ -26,6 +26,7 @@
 #include <session/sqlite.hpp>
 #include <set>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <tuple>
 
@@ -406,9 +407,14 @@ void Client::_init() {
     _disk_loop = core.disk_loop();
     _disk_jq.emplace(*_disk_loop);
 
+    if (core.db_path() != ":memory:")
+        _journal_file = core.db_path().string() + "-send-status-" + random::unique_id("client", 8);
+
     // Core's send queue is in-memory, so anything still mid-flight when the last run ended is not
-    // resumed and its outcome is unknowable.  Say so rather than guessing either way.
+    // resumed and its outcome is unknowable.  Say so rather than guessing either way -- except for
+    // the sends whose outcome a suspended run did hear, and kept.
     auto c = core.database().conn();
+    _apply_journals(c);
     c.prepared_exec(
             R"(
         UPDATE messages SET send_state = ? WHERE send_state IN (?, ?)
@@ -1424,13 +1430,13 @@ void Client::_start_transfer(std::string name, std::shared_ptr<Transfer> t) {
         if (t->memory)
             memory = std::move(*t->memory);
 
-        call([this,
-              name,
-              t,
-              result,
-              why = std::move(why),
-              cached_size,
-              memory = std::move(memory)]() mutable {
+        _call_with_storage([this,
+                            name,
+                            t,
+                            result,
+                            why = std::move(why),
+                            cached_size,
+                            memory = std::move(memory)]() mutable {
             auto found = _in_flight.find(name);
             if (found == _in_flight.end() || found->second != t)
                 return;
@@ -2775,7 +2781,8 @@ void Client::_auto_download(const ConversationId& convo_id, int64_t message_id) 
 }
 
 void Client::_pump_auto_downloads() {
-    if (_auto_pumping)
+    // Resuming storage pumps again.
+    if (_auto_pumping || core.storage_suspended())
         return;
     _auto_pumping = true;
 
@@ -4661,79 +4668,80 @@ void Client::_upload_one(
         // Core's loop's alone.  Nobody is waiting on a callback here -- this is Client's
         // own continuation -- so a failure has to be turned into the message failing, which
         // is what the application is watching.
-        call([this, client_id, index, on_upload, plaintext_size, result = std::move(result)] {
-            try {
-                if (auto* err = std::get_if<int16_t>(&result)) {
-                    log::warning(
-                            cat,
-                            "Upload of attachment {} of message {} failed: {}",
-                            index,
-                            client_id,
-                            *err);
-                    if (on_upload)
-                        on_upload(
+        _call_with_storage(
+                [this, client_id, index, on_upload, plaintext_size, result = std::move(result)] {
+                    try {
+                        if (auto* err = std::get_if<int16_t>(&result)) {
+                            log::warning(
+                                    cat,
+                                    "Upload of attachment {} of message {} failed: {}",
+                                    index,
+                                    client_id,
+                                    *err);
+                            if (on_upload)
+                                on_upload(
+                                        index,
+                                        0,
+                                        0,
+                                        unexpected{Error{
+                                                err::upload_failed,
+                                                "upload failed with status {}"_format(*err)}});
+                            return _fail_attachment_send(client_id);
+                        }
+
+                        const auto& [meta, key] = std::get<0>(result);
+                        // upload_file always encrypts with the stream scheme, so the url has to say
+                        // so: without the fragment a recipient reaches for the legacy scheme and
+                        // cannot open the file at all.
+                        auto url = network::file_server::generate_download_url(
+                                meta.id,
+                                core.network()->file_server_config,
+                                /*stream_encrypted=*/true);
+
+                        {
+                            auto c = core.database().conn();
+                            // The file's own size, not the encrypted one the server reports back:
+                            // `size` on the pointer means the plaintext length everywhere else in
+                            // Session, and for a legacy-encrypted attachment it is what a recipient
+                            // trims the padding by, so an encrypted size there would be wrong in a
+                            // way that breaks decryption rather than merely misreporting.
+                            c.prepared_exec(
+                                    "UPDATE message_attachments SET url = ?, key = ?, size = ?"
+                                    " WHERE message = ? AND idx = ?",
+                                    url,
+                                    std::span<const std::byte>{key},
+                                    plaintext_size,
+                                    client_id,
+                                    static_cast<int64_t>(index));
+                        }
+
+                        // After the url is recorded, since that is what says where the copy belongs
+                        // -- and before the message is announced as sent, so a display reacting to
+                        // that already sees the file as here rather than being told a moment later.
+                        _cache_outgoing_attachment(client_id, index, url);
+
+                        log::debug(
+                                cat,
+                                "Uploaded attachment {} of message {} ({} bytes) to {}",
                                 index,
-                                0,
-                                0,
-                                unexpected{
-                                        Error{err::upload_failed,
-                                              "upload failed with status {}"_format(*err)}});
-                    return _fail_attachment_send(client_id);
-                }
+                                client_id,
+                                meta.size,
+                                url);
 
-                const auto& [meta, key] = std::get<0>(result);
-                // upload_file always encrypts with the stream scheme, so the url has to say
-                // so: without the fragment a recipient reaches for the legacy scheme and
-                // cannot open the file at all.
-                auto url = network::file_server::generate_download_url(
-                        meta.id,
-                        core.network()->file_server_config,
-                        /*stream_encrypted=*/true);
+                        if (on_upload)
+                            on_upload(index, meta.size, meta.size, Expected<void>{});
 
-                {
-                    auto c = core.database().conn();
-                    // The file's own size, not the encrypted one the server reports back:
-                    // `size` on the pointer means the plaintext length everywhere else in
-                    // Session, and for a legacy-encrypted attachment it is what a recipient
-                    // trims the padding by, so an encrypted size there would be wrong in a
-                    // way that breaks decryption rather than merely misreporting.
-                    c.prepared_exec(
-                            "UPDATE message_attachments SET url = ?, key = ?, size = ?"
-                            " WHERE message = ? AND idx = ?",
-                            url,
-                            std::span<const std::byte>{key},
-                            plaintext_size,
-                            client_id,
-                            static_cast<int64_t>(index));
-                }
-
-                // After the url is recorded, since that is what says where the copy belongs -- and
-                // before the message is announced as sent, so a display reacting to that already
-                // sees the file as here rather than being told a moment later.
-                _cache_outgoing_attachment(client_id, index, url);
-
-                log::debug(
-                        cat,
-                        "Uploaded attachment {} of message {} ({} bytes) to {}",
-                        index,
-                        client_id,
-                        meta.size,
-                        url);
-
-                if (on_upload)
-                    on_upload(index, meta.size, meta.size, Expected<void>{});
-
-                _upload_next(client_id, on_upload);
-            } catch (const std::exception& e) {
-                log::error(
-                        cat,
-                        "Recording attachment {} of message {} failed: {}",
-                        index,
-                        client_id,
-                        e.what());
-                _fail_attachment_send(client_id);
-            }
-        });
+                        _upload_next(client_id, on_upload);
+                    } catch (const std::exception& e) {
+                        log::error(
+                                cat,
+                                "Recording attachment {} of message {} failed: {}",
+                                index,
+                                client_id,
+                                e.what());
+                        _fail_attachment_send(client_id);
+                    }
+                });
     };
 
     log::debug(cat, "Uploading attachment {} of message {}: {}", index, client_id, path);
@@ -5374,7 +5382,7 @@ void Client::_cache_outgoing_attachment(int64_t client_id, size_t index, const s
             return;
         }
 
-        call([this, url, file, on_disk] { _record_cached(url, file, on_disk); });
+        _call_with_storage([this, url, file, on_disk] { _record_cached(url, file, on_disk); });
     });
 }
 
@@ -6421,40 +6429,142 @@ void Client::_apply_send_status(
         core::MessageSendStatus status,
         bool sync,
         std::optional<std::string_view> swarm_hash) {
-    auto state = state_for(status);
-    std::optional<ConversationId> convo;
-    {
+    auto park = [&] {
+        _parked_statuses.push_back(
+                {client_id,
+                 sync,
+                 status,
+                 swarm_hash ? std::optional<std::string>{*swarm_hash} : std::nullopt});
+        _write_journal();
+        _when_resumed.push_back([this, client_id, status, sync, hash = _parked_statuses.back()] {
+            _apply_send_status(client_id, status, sync, hash.swarm_hash);
+        });
+    };
+    if (core.storage_suspended())
+        return park();
+
+    bool changed;
+    try {
         auto c = core.database().conn();
-        SQLite::Transaction tx{c.sql};
-        // The two sends own one column each, so a status for one never disturbs the other.
-        auto column = sync ? "sync_send_state"sv : "send_state"sv;
-        bool changed =
-                c.prepared_exec(
-                        "UPDATE messages SET {0} = ?1 WHERE id = ?2 AND {0} IS NOT ?1"_format(
-                                column),
-                        static_cast<int>(state),
-                        client_id) > 0;
-
-        // Set once and never revised: the hash is what a redelivery of this same message off our
-        // swarm dedupes against, so pointing it at a later store would strand the row it came from.
-        if (swarm_hash)
-            changed |= c.prepared_exec(
-                               "UPDATE messages SET swarm_hash = ? WHERE id = ? AND swarm_hash IS "
-                               "NULL",
-                               *swarm_hash,
-                               client_id) > 0;
-
-        if (changed) {
-            auto convo_row = c.prepared_maybe_get<int64_t>(
-                    "SELECT conversation FROM messages WHERE id = ?", client_id);
-            if (convo_row)
-                convo = conversation_id_at(c, *convo_row);
-        }
-        tx.commit();
+        changed = _store_send_status(c, client_id, status, sync, swarm_hash);
+    } catch (const sqlite::database_suspended&) {
+        // Suspended between the check and the connection.
+        return park();
     }
-
-    if (convo)
+    if (changed)
         _emit_message(false, client_id);
+}
+
+bool Client::_store_send_status(
+        sqlite::Connection& c,
+        int64_t client_id,
+        core::MessageSendStatus status,
+        bool sync,
+        std::optional<std::string_view> swarm_hash) {
+    auto state = state_for(status);
+    SQLite::Transaction tx{c.sql};
+    // The two sends own one column each, so a status for one never disturbs the other.
+    auto column = sync ? "sync_send_state"sv : "send_state"sv;
+    bool changed =
+            c.prepared_exec(
+                    "UPDATE messages SET {0} = ?1 WHERE id = ?2 AND {0} IS NOT ?1"_format(column),
+                    static_cast<int>(state),
+                    client_id) > 0;
+
+    // Set once and never revised: the hash is what a redelivery of this same message off our swarm
+    // dedupes against, so pointing it at a later store would strand the row it came from.
+    if (swarm_hash)
+        changed |= c.prepared_exec(
+                           "UPDATE messages SET swarm_hash = ? WHERE id = ? AND swarm_hash IS NULL",
+                           *swarm_hash,
+                           client_id) > 0;
+    tx.commit();
+    return changed;
+}
+
+// One line per outcome: the message id, 1 for the sync copy or 0, the status, and the swarm hash or
+// "-".  Swarm hashes are base64, so never contain a space.
+void Client::_write_journal() {
+    if (_journal_file.empty())
+        return;
+    try {
+        auto tmp = _journal_file;
+        tmp += ".tmp";
+        {
+            std::ofstream out{tmp, std::ios::trunc};
+            for (const auto& p : _parked_statuses)
+                out << p.client_id << ' ' << (p.sync ? 1 : 0) << ' ' << static_cast<int>(p.status)
+                    << ' ' << p.swarm_hash.value_or("-") << '\n';
+            out.flush();
+            if (!out)
+                throw std::runtime_error{"write failed"};
+        }
+        // Renamed into place so that a process frozen part-way leaves the previous whole file,
+        // never half of a new one.
+        std::filesystem::rename(tmp, _journal_file);
+    } catch (const std::exception& e) {
+        log::warning(cat, "Could not keep a send's outcome while suspended: {}", e.what());
+    }
+}
+
+void Client::_apply_journals(sqlite::Connection& c) {
+    auto db = core.db_path();
+    if (db == ":memory:")
+        return;
+    auto dir = db.parent_path().empty() ? std::filesystem::path{"."} : db.parent_path();
+    auto prefix = db.filename().string() + "-send-status-";
+
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator{dir, ec}) {
+        auto name = entry.path().filename().string();
+        if (!name.starts_with(prefix) || name.ends_with(".tmp"))
+            continue;
+        std::ifstream in{entry.path()};
+        std::string line;
+        int applied = 0;
+        while (std::getline(in, line)) {
+            std::istringstream fields{line};
+            int64_t id;
+            int sync, status;
+            std::string hash;
+            if (!(fields >> id >> sync >> status >> hash))
+                continue;
+            _store_send_status(
+                    c,
+                    id,
+                    static_cast<core::MessageSendStatus>(status),
+                    sync != 0,
+                    hash == "-" ? std::nullopt : std::optional<std::string_view>{hash});
+            applied++;
+        }
+        in.close();
+        log::info(cat, "Recorded {} send outcome(s) kept while suspended, from {}", applied, name);
+        std::filesystem::remove(entry.path(), ec);
+    }
+}
+
+sqlite::Database::suspend_result Client::suspend_storage(
+        std::chrono::milliseconds wait, bool interrupt, bool checkpoint) {
+    return core.suspend_storage(wait, interrupt, checkpoint);
+}
+
+void Client::resume_storage() {
+    core.resume_storage();
+    call_get([this] {
+        // Moved out first: a continuation run here may itself want to be kept, if storage was
+        // suspended again meanwhile, and must not land in the list being run.
+        auto kept = std::exchange(_when_resumed, {});
+        _parked_statuses.clear();
+        for (auto& f : kept)
+            f();
+        // Every parked outcome has now been recorded, or parked again and rewritten.
+        if (_parked_statuses.empty() && !_journal_file.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(_journal_file, ec);
+        }
+        _pump_auto_downloads();
+        return 0;
+    });
 }
 
 }  // namespace session::client

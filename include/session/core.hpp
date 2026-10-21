@@ -1,6 +1,9 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <concepts>
+#include <filesystem>
 #include <memory>
 #include <oxen/quic/loop.hpp>
 #include <session/clock.hpp>
@@ -321,6 +324,14 @@ class Core {
     sqlite::Database db;
     friend class detail::CoreComponent;
 
+    // Where `db` is, or ":memory:".  Kept because the database does not say, and Client keeps a
+    // file beside it (see `Client::suspend_storage`).
+    std::filesystem::path _db_path;
+
+    // Set from `suspend_storage` until `resume_storage`.  Read anywhere, so atomic; but only set on
+    // the loop, between jobs.
+    std::atomic<bool> _storage_suspended{false};
+
     // Friendship does not reach a component through its base, and Configs pushes to the swarm, so
     // it needs `_swarm_request` by name.
     friend class Configs;
@@ -607,7 +618,8 @@ class Core {
     Core(std::filesystem::path db_path, Opts&&... opts) :
             callbacks{detail::maybe_instance<core::callbacks>(std::forward<Opts>(opts)...)
                               .value_or(core::callbacks{})},
-            db{_make_db(std::move(db_path), std::forward<Opts>(opts)...)} {
+            db{_make_db(db_path, std::forward<Opts>(opts)...)},
+            _db_path{std::move(db_path)} {
         _schema_extensions = detail::all_instances<schema_extension>(std::forward<Opts>(opts)...);
         if (auto s = detail::maybe_instance<predefined_seed>(std::forward<Opts>(opts)...))
             globals._predefined_seed = std::move(s->bytes);
@@ -640,6 +652,42 @@ class Core {
     /// So a fix is not a `_loop.call` around this body: polling has to be stopped and in-flight
     /// swarm work quiesced before the old Network is dropped.
     void set_network(std::unique_ptr<network::Network> network);
+
+    /// **The suspend contract.**  iOS kills an app that is suspended while holding a lock on a file
+    /// in a shared container, and the database is shared with a notification extension there.  So
+    /// before the app is suspended, its wake wrapper calls this, and nothing in the process touches
+    /// the database again until `resume_storage()`.  Platform-neutral, but only iOS needs to call
+    /// it: elsewhere nothing kills a process for a lock it holds.
+    ///
+    /// In order, it:
+    /// - stops polling and drops any push subscription, on the loop between jobs;
+    /// - writes the dumps of any configs that changed and have not been written;
+    /// - refuses new database connections with `sqlite::database_suspended` (retriable);
+    /// - waits up to `wait` for work already holding one to finish, interrupting it first with
+    ///   `interrupt` (the emergency case, when the background time has run out: a statement
+    ///   interrupted mid-transaction throws, and the transaction rolls back);
+    /// - closes every connection, and with `checkpoint` also checkpoints and truncates the WAL.
+    ///   The app asks for that; an extension, short-lived and suspended rarely, need not.
+    ///
+    /// While suspended, a poll reply or pushed message that still arrives is dropped without moving
+    /// its retrieve cursor, so it is fetched again after resume; a config push that completes is
+    /// left unconfirmed, so it is pushed again.  Anything else that reaches for the database is a
+    /// bug in whatever forgot to resume: it is refused, and logged as critical.
+    ///
+    /// Returns what was managed in time: see `sqlite::Database::suspend`.  Blocking; not to be
+    /// called on the loop.
+    sqlite::Database::suspend_result suspend_storage(
+            std::chrono::milliseconds wait, bool interrupt = false, bool checkpoint = false);
+
+    /// Lifts `suspend_storage`: connections reopen as they are next needed, polling restarts at
+    /// once, and configs changed meanwhile are pushed.  Safe to call when not suspended.
+    void resume_storage();
+
+    /// Whether `suspend_storage` is in force.
+    bool storage_suspended() const { return _storage_suspended; }
+
+    /// The path the database was opened at, or ":memory:".
+    const std::filesystem::path& db_path() const { return _db_path; }
 
     /// Constructs a Network from `args` and attaches it, returning a reference to it that is valid
     /// for as long as this Core is.  The usual way to attach one:

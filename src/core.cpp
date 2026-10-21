@@ -81,6 +81,15 @@ void Core::init() {
 
     apply_migrations();
 
+    // Whatever is refused while suspended forgot to resume -- see `suspend_storage` -- and on iOS
+    // that is the bug which gets the app killed, so it is reported as loudly as anything here.
+    db.on_refused([] {
+        log::critical(
+                cat,
+                "Database work was refused because storage is suspended: whatever started it ran "
+                "without resuming storage first");
+    });
+
     for (auto* component : _comp_init)
         component->init();
 
@@ -145,9 +154,12 @@ Core::~Core() {
     //
     // Swallowed rather than propagated: this is a destructor, and a database that cannot be written
     // is not something the caller tearing Core down can act on.
+    //
+    // Not while storage is suspended, which refuses it: `suspend_storage` wrote the dumps, and
+    // nothing has changed them since that could be written.
     try {
         call_get([this] {
-            if (globals.have_account())
+            if (globals.have_account() && !_storage_suspended)
                 configs.store_dumps();
             _jq.stop();
         });
@@ -226,13 +238,62 @@ void Core::set_network(std::unique_ptr<network::Network> network) {
     _update_polling();
 }
 
+sqlite::Database::suspend_result Core::suspend_storage(
+        std::chrono::milliseconds wait, bool interrupt, bool checkpoint) {
+    // On the loop, so it lands between jobs: no Core job is part-way through a transaction, and
+    // from here none starts one.
+    call_get([this] {
+        _storage_suspended = true;
+        _drop_subscription("storage is suspending");
+        _remove_timer(_poll_timer);
+
+        // A dump not yet written is a change that would otherwise exist only in this process's
+        // memory for as long as it is suspended -- and a suspended process is the one iOS kills.
+        try {
+            configs.store_dumps();
+        } catch (const no_account&) {
+            // No account, no configs to have changed.
+        } catch (const std::exception& e) {
+            log::warning(cat, "Could not write config dumps before suspending: {}", e.what());
+        }
+    });
+
+    auto result = db.suspend(wait, interrupt, checkpoint);
+    log::info(
+            cat,
+            "Storage suspended{}{}",
+            result.closed ? "" : ", but a connection was still held when the wait ran out",
+            result.checkpointed ? "; WAL checkpointed" : "");
+    return result;
+}
+
+void Core::resume_storage() {
+    db.resume();
+    call_get([this] {
+        if (!_storage_suspended.exchange(false))
+            return;
+        log::info(cat, "Storage resumed");
+        _update_polling();
+        // Now rather than at the next tick: whatever arrived while suspended is the first thing
+        // anybody resuming wants.
+        _poll();
+        try {
+            if (configs.needs_push())
+                configs.push_now();
+        } catch (const no_account&) {
+        }
+    });
+}
+
 void Core::_remove_timer(quic::TimerID& timer) {
     if (auto t = std::exchange(timer, {}))
         _jq.remove(t);
 }
 
 void Core::_update_polling() {
-    if (_network && !_poll_timer)
+    if (_storage_suspended)
+        _remove_timer(_poll_timer);
+    else if (_network && !_poll_timer)
         _poll_timer = _jq.add_timer(_poll_interval, [this] { _poll(); });
     else if (!_network)
         _remove_timer(_poll_timer);
@@ -597,6 +658,10 @@ void Core::_swarm_response(
 }
 
 void Core::_poll() {
+    if (_storage_suspended) {
+        log::debug(cat, "Not polling: storage is suspended");
+        return;
+    }
     if (!_network) {
         log::debug(cat, "Not polling: no network attached");
         return;
@@ -749,6 +814,9 @@ void Core::_handle_profile_response(
 /// Merges one member's config and records where that member's next retrieve resumes.
 void Core::_absorb_profile_answer(
         const network::ed25519_pubkey& node, std::span<const SwarmMessage> messages) {
+    // As a poll's: nothing merged and no cursor moved, so the next poll retrieves it.
+    if (_storage_suspended)
+        return;
     auto configs_held = configs.batch();
     // Final, even where the member said it was holding more.  This is a one-shot fetch rather than
     // a poll that continues: the cursor recorded below is what lets the ordinary poll pick up
@@ -953,6 +1021,13 @@ void Core::_handle_poll_response(
         std::vector<config::Namespace> namespaces,
         std::string body,
         int round) {
+
+    // Its messages cannot be stored, so none is handled and no cursor moves: the next poll after
+    // resuming retrieves them again.
+    if (_storage_suspended) {
+        log::debug(cat, "Dropping a poll response: storage is suspended");
+        return;
+    }
 
     const auto& sn_pubkey = node.remote_pubkey;
 
@@ -1253,6 +1328,11 @@ void Core::_drop_subscription(std::string_view why) {
 }
 
 void Core::_handle_server_push(std::string_view endpoint, std::span<const std::byte> body) {
+    // A push never moves a cursor, so the poll after resuming retrieves this message too.
+    if (_storage_suspended) {
+        log::debug(cat, "Dropping a pushed message: storage is suspended");
+        return;
+    }
     if (endpoint != NOTIFY_ENDPOINT) {
         log::debug(cat, "Ignoring pushed '{}': not a notification", endpoint);
         return;
