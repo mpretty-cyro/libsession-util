@@ -278,6 +278,8 @@ void Core::resume_storage() {
         // anybody resuming wants.
         _poll();
         try {
+            // What another process sharing the database wrote while this one was suspended.
+            configs.reload_if_changed();
             if (configs.needs_push())
                 configs.push_now();
         } catch (const no_account&) {
