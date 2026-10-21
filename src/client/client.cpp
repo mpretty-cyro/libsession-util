@@ -745,16 +745,6 @@ Client::~Client() {
     _disk_loop->call_get([this] { _disk_jq->stop(); });
 }
 
-void Client::_refuse_while_suspended() {
-    if (!core.storage_suspended())
-        return;
-    log::critical(
-            cat,
-            "A call into the Client was refused because storage is suspended: whatever made it ran "
-            "without resuming storage first");
-    throw sqlite::database_suspended{"storage is suspended"};
-}
-
 sqlite::Database::suspend_result Client::suspend_storage(
         std::chrono::milliseconds wait, bool interrupt, bool checkpoint) {
     return core.suspend_storage(wait, interrupt, checkpoint);

@@ -343,3 +343,20 @@ TEST_CASE("Core: destroyed while suspended with a job held and no Client", "[cor
         db.resume();
     CHECK(done);
 }
+
+TEST_CASE("Core: a blocking call while storage is suspended is refused", "[core][suspend]") {
+    // As Client's: rather than waiting for a resume its own thread may be the one to make
+    TempCore core;
+    core->suspend_storage(1s);
+    CHECK_THROWS_AS(core->call_get([] { return 0; }), sqlite::database_suspended);
+    CHECK_THROWS_AS(core->devices.device_info(await), sqlite::database_suspended);
+
+    // A call taking a callback is queued instead, and answered once resumed
+    std::promise<bool> answered;
+    core->call([&] { answered.set_value(true); });
+
+    core->resume_storage();
+    CHECK(answered.get_future().get());
+    CHECK(core->call_get([] { return 1; }) == 1);
+    CHECK_NOTHROW(core->devices.device_info(await));
+}

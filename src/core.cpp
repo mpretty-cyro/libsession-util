@@ -152,7 +152,7 @@ Core::~Core() {
     // Before the Network goes, because a poll or a renew that fires while it is being torn down
     // would reach it; stopping `_jq` below cancels them too, but only once the Network is already
     // gone.  On the loop because the ids are only ever touched there.
-    call_get([this] {
+    _jq.call_get([this] {
         for (auto* timer : {&_poll_timer, &_sub_timer, &_probe_timer})
             _remove_timer(*timer);
     });
@@ -180,7 +180,7 @@ Core::~Core() {
     // Not after a suspend, which wrote the dumps: what has changed them since is held work that
     // would only now be finishing, and is better dumped on the next start-up than here.
     try {
-        call_get([this] {
+        _jq.call_get([this] {
             if (globals.have_account() && !_storage_suspended)
                 configs.store_dumps();
             _jq.stop();
@@ -260,6 +260,16 @@ void Core::set_network(std::unique_ptr<network::Network> network) {
     _update_polling();
 }
 
+void Core::refuse_while_suspended() const {
+    if (!_storage_suspended)
+        return;
+    log::critical(
+            cat,
+            "A blocking call was refused because storage is suspended: whatever made it ran "
+            "without resuming storage first");
+    throw sqlite::database_suspended{"storage is suspended"};
+}
+
 sqlite::Database::suspend_result Core::suspend_storage(
         std::chrono::milliseconds wait, bool interrupt, bool checkpoint) {
     std::lock_guard lock{_suspend_mutex};
@@ -272,7 +282,7 @@ sqlite::Database::suspend_result Core::suspend_storage(
 
     // On the loop, so it lands between jobs: no Core job is part-way through a transaction, and
     // from here any that wants the database waits for the resume.
-    call_get([this] {
+    _jq.call_get([this] {
         _storage_suspended = true;
         _drop_subscription("storage is suspending");
         _remove_timer(_poll_timer);
@@ -304,7 +314,7 @@ void Core::resume_storage() {
     db.resume();
     std::lock_guard lock{_suspend_mutex};
     db.resume();
-    call_get([this] {
+    _jq.call_get([this] {
         if (!_storage_suspended.exchange(false))
             return;
         log::info(cat, "Storage resumed");
