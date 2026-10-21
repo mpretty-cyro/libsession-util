@@ -8,16 +8,6 @@ namespace {
 
 constexpr auto PEER = "05fe94b7ad4b7f1cc1bb92671f1f0d243f226e115b33770465e82b503fc3e96e1f"_hex_b;
 
-// The files a Client keeps parked send outcomes in, beside the database.
-std::vector<std::filesystem::path> journals(const std::filesystem::path& db) {
-    std::vector<std::filesystem::path> found;
-    auto prefix = db.filename().string() + "-send-status-";
-    for (const auto& entry : std::filesystem::directory_iterator{db.parent_path()})
-        if (entry.path().filename().string().starts_with(prefix))
-            found.push_back(entry.path());
-    return found;
-}
-
 // The bytes a swarm holds for a plain v1 DM to `to`.
 std::vector<std::byte> dm_bytes(
         Client& to, const SenderKeys& from, std::string_view body, sys_ms ts) {
@@ -47,6 +37,16 @@ std::string retrieve_answer(
     return nlohmann::json{{"results", std::move(results)}}.dump();
 }
 
+// Runs `answer` -- a mock network's reply -- on a thread of its own: the mock hands a reply to
+// Core's loop and waits for it to be handled, and while storage is suspended handling it waits for
+// the resume, which the test's own thread has to be free to make.
+template <typename F>
+std::thread answer_while_suspended(F answer) {
+    auto t = std::thread{std::move(answer)};
+    std::this_thread::sleep_for(100ms);
+    return t;
+}
+
 // A message on its way out: both of its stores captured and unanswered.
 int64_t start_send(TempClient& c, MockNetwork& net) {
     TestHelper::seed_pfs_nak(c->core, PEER);
@@ -71,6 +71,9 @@ TEST_CASE("Client: suspended storage holds no lock on the database", "[client][s
     CHECK(result.closed);
     CHECK(result.checkpointed);
     CHECK(c->core.storage_suspended());
+    // What the outsider below cannot tell apart: an idle connection still open holds a lock on the
+    // shared-memory file without stopping its exclusive lock or its checkpoint.
+    CHECK(c->core.database().open_connections() == 0);
 
     sqlite3* other;
     REQUIRE(sqlite3_open_v2(c.path.c_str(), &other, SQLITE_OPEN_READWRITE, nullptr) == SQLITE_OK);
@@ -89,7 +92,8 @@ TEST_CASE("Client: suspended storage holds no lock on the database", "[client][s
           2);
 }
 
-TEST_CASE("Client: work while storage is suspended is refused", "[client][suspend]") {
+TEST_CASE("Client: a blocking call while storage is suspended is refused", "[client][suspend]") {
+    // Rather than waiting: the thread making it may be the one that would resume.
     TempClient c;
     c->suspend_storage(1s);
     CHECK_THROWS_AS(c->conversations(await), sqlite::database_suspended);
@@ -98,7 +102,17 @@ TEST_CASE("Client: work while storage is suspended is refused", "[client][suspen
 }
 
 TEST_CASE(
-        "Client: a poll answered while suspended stores nothing and is retrieved again",
+        "Client: database work off Core's threads while suspended is refused",
+        "[client][suspend]") {
+    TempClient c;
+    c->suspend_storage(1s);
+    CHECK_THROWS_AS(c->core.database().conn(), sqlite::database_suspended);
+    c->resume_storage();
+    CHECK_NOTHROW(c->core.database().conn());
+}
+
+TEST_CASE(
+        "Client: a poll answered while suspended is stored when storage resumes",
         "[client][suspend][poll]") {
     TempClient c;
     auto* net = attach_mock_network(c->core);
@@ -118,30 +132,26 @@ TEST_CASE(
     auto first = net->sent_requests[0];
     c->suspend_storage(1s);
 
-    first.callback(true, false, 200, {}, retrieve_answer(*first.request.body, dm_ns, batch));
-    TestHelper::drain(c->core);
+    // Handling it waits for the resume, holding Core's loop up.
+    auto answer = answer_while_suspended([&] {
+        first.callback(true, false, 200, {}, retrieve_answer(*first.request.body, dm_ns, batch));
+    });
     CHECK(net->sent_requests.size() == 1);
 
-    // Resuming polls at once, and nothing had been stored or the cursor moved, so it asks from
-    // where it was and the message arrives.
     c->resume_storage();
-    CHECK(TestHelper::namespace_last_hash(c->core, dm_ns, node) == std::nullopt);
-    // Among what resuming sent -- the configs a new account has to push go out too -- the poll.
-    auto is_retrieve = [](const MockNetwork::SentRequest& r) {
-        auto body = parse_json(*r.request.body);
-        return body.contains("requests") && body["requests"][0]["method"] == "retrieve";
-    };
-    auto polls = std::ranges::count_if(net->sent_requests, is_retrieve);
-    REQUIRE(polls == 2);
-    auto second = *std::ranges::find_if(
-            net->sent_requests.begin() + 1, net->sent_requests.end(), is_retrieve);
-    second.callback(true, false, 200, {}, retrieve_answer(*second.request.body, dm_ns, batch));
+    answer.join();
     TestHelper::drain(c->core);
-
     auto convo = c->conversation(ConversationId::dm(sender.session_id), await);
     REQUIRE(convo);
     CHECK(convo->messages(await).size() == 1);
     CHECK(TestHelper::namespace_last_hash(c->core, dm_ns, node) == "h1");
+
+    // And resuming polls at once, from where the held answer left the cursor.
+    auto is_retrieve = [](const MockNetwork::SentRequest& r) {
+        auto body = parse_json(*r.request.body);
+        return body.contains("requests") && body["requests"][0]["method"] == "retrieve";
+    };
+    CHECK(std::ranges::count_if(net->sent_requests, is_retrieve) == 2);
 }
 
 TEST_CASE(
@@ -152,36 +162,38 @@ TEST_CASE(
     auto id = start_send(c, *net);
 
     c->suspend_storage(1s);
-    CHECK(accept_stores(*net) == 2);
-    // Kept, in memory and in a file beside the database.
-    CHECK(journals(c.path).size() == 1);
+    size_t accepted = 0;
+    auto answer = answer_while_suspended([&] { accepted = accept_stores(*net); });
 
     c->resume_storage();
+    answer.join();
+    CHECK(accepted == 2);
+    sync(*c);
     auto msg = c->message(id, await);
     CHECK(msg->send_state == SendState::sent);
     CHECK(msg->sync_send_state == SendState::sent);
     CHECK(msg->hash == store_hash_for(oxenc::to_hex(own_sid(*c))));
-    CHECK(journals(c.path).empty());
 }
 
 TEST_CASE(
-        "Client: a send outcome kept while suspended outlives the process",
+        "Client: a send answered while suspended is recorded if the Client ends first",
         "[client][suspend][send]") {
-    // A suspended app is the one iOS kills, and the next launch would otherwise call a message that
-    // did go out interrupted.  Ending the Client while suspended stands in for that.
+    // Ending the Client lets the held answer finish rather than waiting for ever.  A process killed
+    // while suspended runs no destructor, and that send is called interrupted on the next launch:
+    // see `SendState::interrupted`.
     TempClient c;
     auto* net = attach_mock_network(c->core);
     auto id = start_send(c, *net);
 
     c->suspend_storage(1s);
-    CHECK(accept_stores(*net) == 2);
-    REQUIRE(journals(c.path).size() == 1);
-
+    size_t accepted = 0;
+    auto answer = answer_while_suspended([&] { accepted = accept_stores(*net); });
     c.reopen();
+    answer.join();
+    CHECK(accepted == 2);
     auto msg = c->message(id, await);
     CHECK(msg->send_state == SendState::sent);
     CHECK(msg->sync_send_state == SendState::sent);
-    CHECK(journals(c.path).empty());
 }
 
 TEST_CASE(
@@ -193,7 +205,6 @@ TEST_CASE(
     auto id = start_send(c, *net);
 
     c->suspend_storage(1s);
-    CHECK(journals(c.path).empty());
     c.reopen();
     CHECK(c->message(id, await)->send_state == SendState::interrupted);
 }
@@ -243,14 +254,16 @@ TEST_CASE(
     sync(*c);
     REQUIRE(net->downloads.size() == 1);
 
-    // The file arrives while suspended.  Recording it needs the database, so it is kept rather
-    // than finished -- or dropped, which would leave the save waiting for ever.
+    // The file arrives while suspended.  Recording it needs the database, so it waits for the
+    // resume -- holding the loops up, so nothing here may wait on them until then.
     c->suspend_storage(1s);
-    REQUIRE(serve_downloads(*net, ciphertext) == 1);
-    sync(*c);
+    size_t served = 0;
+    auto answer = answer_while_suspended([&] { served = serve_downloads(*net, ciphertext); });
     CHECK(waiter.wait_for(200ms) == std::future_status::timeout);
 
     c->resume_storage();
+    answer.join();
+    REQUIRE(served == 1);
     REQUIRE(waiter.wait_for(5s) == std::future_status::ready);
     CHECK_FALSE(waiter.get().has_value());
     CHECK(std::filesystem::file_size(dest) == plaintext.size());

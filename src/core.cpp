@@ -26,6 +26,7 @@
 #include <session/session_protocol.hpp>
 #include <session/util.hpp>
 #include <session/xed25519.hpp>
+#include <thread>
 #include <unordered_set>
 
 #include "core/swarm_request.hpp"
@@ -81,8 +82,24 @@ void Core::init() {
 
     apply_migrations();
 
-    // Whatever is refused while suspended forgot to resume -- see `suspend_storage` -- and on iOS
-    // that is the bug which gets the app killed, so it is reported as loudly as anything here.
+    // While storage is suspended (see `suspend_storage`) work on these two threads waits for the
+    // resume rather than failing: jobs already queued there, and answers the network brings back
+    // to them, cannot all be stopped at a suspend, and are lost if refused.  Anything else that
+    // reaches for the database then forgot to resume -- on iOS the bug which gets the app killed --
+    // so it is refused and reported as loudly as anything here.
+    auto thread_id = [] { return std::this_thread::get_id(); };
+    db.hold_while_suspended(_loop.call_get(thread_id));
+    db.hold_while_suspended(_disk_loop->call_get(thread_id));
+    db.on_hold([](std::chrono::milliseconds waited) {
+        if (waited == 0ms)
+            log::info(cat, "Database work is waiting for storage to resume");
+        else
+            log::critical(
+                    cat,
+                    "Database work has waited {} for storage to resume: whatever suspended it has "
+                    "not resumed it",
+                    waited);
+    });
     db.on_refused([] {
         log::critical(
                 cat,
@@ -137,6 +154,10 @@ Core::~Core() {
 
     // Blocking, and it must not run on the Network's own loop -- it does not, because a Core is
     // destroyed by whoever owns it.  Before the queue is stopped rather than after: tearing the
+    // A job waiting for storage to resume would otherwise keep the loop, and the call_get below,
+    // waiting for ever.  It runs to its end instead, as it would have on resume.
+    db.resume();
+
     // Network down fails whatever it still holds, and those completions marshal onto our queue,
     // which throws if it has already been stopped.  Queued here they are simply cancelled below.
     _network.reset();
@@ -155,8 +176,8 @@ Core::~Core() {
     // Swallowed rather than propagated: this is a destructor, and a database that cannot be written
     // is not something the caller tearing Core down can act on.
     //
-    // Not while storage is suspended, which refuses it: `suspend_storage` wrote the dumps, and
-    // nothing has changed them since that could be written.
+    // Not after a suspend, which wrote the dumps: what has changed them since is held work that
+    // would only now be finishing, and is better dumped on the next start-up than here.
     try {
         call_get([this] {
             if (globals.have_account() && !_storage_suspended)
@@ -240,8 +261,9 @@ void Core::set_network(std::unique_ptr<network::Network> network) {
 
 sqlite::Database::suspend_result Core::suspend_storage(
         std::chrono::milliseconds wait, bool interrupt, bool checkpoint) {
+    std::lock_guard lock{_suspend_mutex};
     // On the loop, so it lands between jobs: no Core job is part-way through a transaction, and
-    // from here none starts one.
+    // from here any that wants the database waits for the resume.
     call_get([this] {
         _storage_suspended = true;
         _drop_subscription("storage is suspending");
@@ -268,6 +290,11 @@ sqlite::Database::suspend_result Core::suspend_storage(
 }
 
 void Core::resume_storage() {
+    // Before the lock as well as after: this cuts short a suspend still waiting for connections, so
+    // that it lets go of the lock without using its whole wait -- and the second is for when that
+    // suspend had not begun its wait yet, and so would otherwise leave the database suspended.
+    db.resume();
+    std::lock_guard lock{_suspend_mutex};
     db.resume();
     call_get([this] {
         if (!_storage_suspended.exchange(false))
@@ -526,46 +553,63 @@ void Core::_swarm_attempt(std::shared_ptr<SwarmOp> op) {
     // after it has been emptied.
     auto swarm_pubkey = op->swarm_pubkey;
 
+    // The answer comes on the network's own thread.  Choosing there is what it has always done,
+    // but sending builds the request body, which for a poll reads the database -- and while
+    // storage is suspended that waits for the resume only on Core's own threads, and is refused
+    // anywhere else.  So then it goes onto our queue instead, as it does when a suspend begins
+    // between the check and the body: nothing has been sent or spent by then, so it starts again.
     net->get_swarm(
             swarm_pubkey,
             false,
-            [this, op = std::move(op), net](
+            [this, op = std::move(op)](
                     network::swarm::swarm_id_t, std::vector<network::service_node> swarm) mutable {
-                auto fail = [&op](int16_t status, std::string why) {
-                    op->on_done(
-                            {false,
-                             status,
-                             std::move(why),
-                             op->spent.empty() ? network::service_node{} : op->spent.back()});
-                };
-
-                if (swarm.empty())
-                    return fail(network::ERROR_NO_SNODE_POOL, "no swarm members available");
-
-                if (op->prefer) {
-                    auto pinned = *op->prefer;
-                    return _swarm_send(std::move(op), std::move(pinned));
+                if (!_storage_suspended) {
+                    try {
+                        return _swarm_chosen(op, swarm);
+                    } catch (const sqlite::database_suspended&) {
+                    }
                 }
-
-                // The first member not already spent.  get_swarm shuffles and partitions by strike
-                // count, so this is the least-struck members first in a random order among equals
-                // -- the right preference anyway; what matters is only that a member already tried
-                // is never chosen again, which is what ends the walk.
-                auto next = std::ranges::find_if(swarm, [&op](const network::service_node& n) {
-                    return std::ranges::find(op->spent, n) == op->spent.end();
+                call([this, op = std::move(op), swarm = std::move(swarm)]() mutable {
+                    _swarm_chosen(std::move(op), std::move(swarm));
                 });
-
-                if (next == swarm.end()) {
-                    log::warning(
-                            cat,
-                            "No swarm member left to try for '{}': all {} are spent.",
-                            op->endpoint,
-                            op->spent.size());
-                    return fail(network::ERROR_INVALID_DESTINATION, "no usable swarm member");
-                }
-
-                _swarm_send(std::move(op), *next);
             });
+}
+
+void Core::_swarm_chosen(std::shared_ptr<SwarmOp> op, std::vector<network::service_node> swarm) {
+    auto fail = [&op](int16_t status, std::string why) {
+        op->on_done(
+                {false,
+                 status,
+                 std::move(why),
+                 op->spent.empty() ? network::service_node{} : op->spent.back()});
+    };
+
+    if (swarm.empty())
+        return fail(network::ERROR_NO_SNODE_POOL, "no swarm members available");
+
+    if (op->prefer) {
+        auto pinned = *op->prefer;
+        return _swarm_send(std::move(op), std::move(pinned));
+    }
+
+    // The first member not already spent.  get_swarm shuffles and partitions by strike
+    // count, so this is the least-struck members first in a random order among equals
+    // -- the right preference anyway; what matters is only that a member already tried
+    // is never chosen again, which is what ends the walk.
+    auto next = std::ranges::find_if(swarm, [&op](const network::service_node& n) {
+        return std::ranges::find(op->spent, n) == op->spent.end();
+    });
+
+    if (next == swarm.end()) {
+        log::warning(
+                cat,
+                "No swarm member left to try for '{}': all {} are spent.",
+                op->endpoint,
+                op->spent.size());
+        return fail(network::ERROR_INVALID_DESTINATION, "no usable swarm member");
+    }
+
+    _swarm_send(std::move(op), *next);
 }
 
 void Core::_swarm_send(std::shared_ptr<SwarmOp> op, network::service_node node) {
@@ -816,9 +860,6 @@ void Core::_handle_profile_response(
 /// Merges one member's config and records where that member's next retrieve resumes.
 void Core::_absorb_profile_answer(
         const network::ed25519_pubkey& node, std::span<const SwarmMessage> messages) {
-    // As a poll's: nothing merged and no cursor moved, so the next poll retrieves it.
-    if (_storage_suspended)
-        return;
     auto configs_held = configs.batch();
     // Final, even where the member said it was holding more.  This is a one-shot fetch rather than
     // a poll that continues: the cursor recorded below is what lets the ordinary poll pick up
@@ -1023,13 +1064,6 @@ void Core::_handle_poll_response(
         std::vector<config::Namespace> namespaces,
         std::string body,
         int round) {
-
-    // Its messages cannot be stored, so none is handled and no cursor moves: the next poll after
-    // resuming retrieves them again.
-    if (_storage_suspended) {
-        log::debug(cat, "Dropping a poll response: storage is suspended");
-        return;
-    }
 
     const auto& sn_pubkey = node.remote_pubkey;
 
@@ -1330,11 +1364,6 @@ void Core::_drop_subscription(std::string_view why) {
 }
 
 void Core::_handle_server_push(std::string_view endpoint, std::span<const std::byte> body) {
-    // A push never moves a cursor, so the poll after resuming retrieves this message too.
-    if (_storage_suspended) {
-        log::debug(cat, "Dropping a pushed message: storage is suspended");
-        return;
-    }
     if (endpoint != NOTIFY_ENDPOINT) {
         log::debug(cat, "Ignoring pushed '{}': not a notification", endpoint);
         return;

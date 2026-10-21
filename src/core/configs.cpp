@@ -503,16 +503,6 @@ void Configs::push_now() {
     _send_push();
 }
 
-bool Configs::_unconfirmable() {
-    // Confirming a push writes the dumps, which a suspended database refuses, and a confirmation
-    // only in memory would be lost with the process.  Left dirty, the configs go out again on
-    // resume, which the swarm's merge makes harmless.
-    if (!core.storage_suspended())
-        return false;
-    log::info(cat, "Config push answered while storage is suspended; it will be pushed again");
-    return true;
-}
-
 void Configs::_send_push() {
     // Checked here rather than at the scheduling end so that everything up to the wire still
     // happens: changes are held and dumped, and needs_push() keeps reporting them, so the state
@@ -615,8 +605,6 @@ void Configs::_send_push() {
                 if (alive.expired())
                     return;
                 _push_in_flight = false;
-                if (_unconfirmable())
-                    return;
 
                 if (!res.ok() || !res.body) {
                     log::warning(
@@ -693,8 +681,6 @@ void Configs::_handle_push_response(
     assert(on_loop());
 
     _push_in_flight = false;
-    if (_unconfirmable())
-        return;
 
     if (!success || !resp) {
         log::warning(
