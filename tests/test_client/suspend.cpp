@@ -1,5 +1,7 @@
 #include <sqlite3.h>
 
+#include <latch>
+
 #include "common.hpp"
 
 // ── The suspend contract ────────────────────────────────────────────────────────────────────────
@@ -37,14 +39,27 @@ std::string retrieve_answer(
     return nlohmann::json{{"results", std::move(results)}}.dump();
 }
 
-// Runs `answer` -- a mock network's reply -- on a thread of its own: the mock hands a reply to
-// Core's loop and waits for it to be handled, and while storage is suspended handling it waits for
-// the resume, which the test's own thread has to be free to make.
+// A mock network's reply, run on a thread of its own: the mock hands a reply to Core's loop and
+// waits for it to be handled, and while storage is suspended handling it waits for the resume,
+// which the test's own thread has to be free to make.  `held()` says the reply has not been
+// handled yet - which, given time to arrive, is the proof that it was held.
+struct HeldAnswer {
+    std::shared_ptr<std::atomic<bool>> returned = std::make_shared<std::atomic<bool>>(false);
+    std::thread thread;
+
+    bool held() const { return !*returned; }
+    void join() { thread.join(); }
+};
+
 template <typename F>
-std::thread answer_while_suspended(F answer) {
-    auto t = std::thread{std::move(answer)};
+HeldAnswer answer_while_suspended(F answer) {
+    HeldAnswer a;
+    a.thread = std::thread{[answer = std::move(answer), returned = a.returned]() mutable {
+        answer();
+        *returned = true;
+    }};
     std::this_thread::sleep_for(100ms);
-    return t;
+    return a;
 }
 
 // A message on its way out: both of its stores captured and unanswered.
@@ -137,6 +152,7 @@ TEST_CASE(
         first.callback(true, false, 200, {}, retrieve_answer(*first.request.body, dm_ns, batch));
     });
     CHECK(net->sent_requests.size() == 1);
+    CHECK(answer.held());
 
     c->resume_storage();
     answer.join();
@@ -164,6 +180,7 @@ TEST_CASE(
     c->suspend_storage(1s);
     size_t accepted = 0;
     auto answer = answer_while_suspended([&] { accepted = accept_stores(*net); });
+    CHECK(answer.held());
 
     c->resume_storage();
     answer.join();
@@ -188,6 +205,7 @@ TEST_CASE(
     c->suspend_storage(1s);
     size_t accepted = 0;
     auto answer = answer_while_suspended([&] { accepted = accept_stores(*net); });
+    CHECK(answer.held());
     c.reopen();
     answer.join();
     CHECK(accepted == 2);
@@ -270,4 +288,58 @@ TEST_CASE(
     CHECK(c->message(msg_id, await)->attachments.at(0).saved_at.has_value());
 
     std::filesystem::remove_all(dir);
+}
+
+TEST_CASE(
+        "Client: suspending again while a job is held returns without waiting on it",
+        "[client][suspend]") {
+    // The second suspend used to wait on the loop for its turn, behind the held job - with the
+    // suspend lock held, and for ever if its thread was the one to resume.
+    TempClient c;
+    auto* net = attach_mock_network(c->core);
+    auto id = start_send(c, *net);
+
+    c->suspend_storage(1s);
+    size_t accepted = 0;
+    auto answer = answer_while_suspended([&] { accepted = accept_stores(*net); });
+    REQUIRE(answer.held());
+
+    auto again = std::async(std::launch::async, [&] { return c->suspend_storage(1s); });
+    bool returned = again.wait_for(5s) == std::future_status::ready;
+    if (!returned)
+        // Unblocks it, so that a failure here ends the test rather than hanging it
+        c->resume_storage();
+    REQUIRE(returned);
+    CHECK(again.get().closed);
+    CHECK(c->core.storage_suspended());
+
+    c->resume_storage();
+    answer.join();
+    CHECK(accepted == 2);
+    sync(*c);
+    CHECK(c->message(id, await)->send_state == SendState::sent);
+}
+
+TEST_CASE("Core: destroyed while suspended with a job held and no Client", "[core][suspend]") {
+    // ~Client resumes before it stops anything; a Core used on its own has to do the same, before
+    // the first thing it waits on the loop for.
+    auto core = std::make_unique<TempCore>();
+    (*core)->suspend_storage(1s);
+
+    std::latch posted{1};
+    (*core)->loop().call([&] {
+        posted.count_down();
+        // Held: Core's loop waits here for the resume
+        (*core)->database().conn();
+    });
+    posted.wait();
+    std::this_thread::sleep_for(50ms);
+
+    auto& db = (*core)->database();
+    auto destroyed = std::async(std::launch::async, [&] { core.reset(); });
+    bool done = destroyed.wait_for(10s) == std::future_status::ready;
+    if (!done)
+        // Releases the held job, so that a failure here ends the test rather than hanging it
+        db.resume();
+    CHECK(done);
 }

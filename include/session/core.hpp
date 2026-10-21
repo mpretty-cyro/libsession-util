@@ -678,6 +678,9 @@ class Core {
     /// on any other thread is refused with `sqlite::database_suspended`, and logged as critical: it
     /// is a bug in whatever forgot to resume.
     ///
+    /// Suspending again while suspended repeats only the database's part: everything on the loop
+    /// was done by the first, and the loop may be holding a job that would make a second wait.
+    ///
     /// Returns what was managed in time: see `sqlite::Database::suspend`.  `wait` bounds the
     /// database's part; before that, putting the loop between jobs waits for the job it is running.
     /// Blocking; not to be called on the loop.

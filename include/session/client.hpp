@@ -1740,11 +1740,19 @@ class Client {
     /// By value, for the same reason as Core's: a reference returned here has escaped the loop.
     template <typename F>
     auto call_get(F&& f) {
-        _refuse_while_suspended();
-        return _jq.call_get(std::forward<F>(f));
+        // From off the loop, refused while storage is suspended (see `suspend_storage`): before it
+        // is queued, and again when it runs, since a suspend landing in between would otherwise
+        // hold the job with the caller blocked on it.
+        const bool off_loop = !core.loop().inside();
+        if (off_loop)
+            _refuse_while_suspended();
+        return _jq.call_get([this, off_loop, &f] {
+            if (off_loop)
+                _refuse_while_suspended();
+            return f();
+        });
     }
-    // Throws `sqlite::database_suspended` for a blocking call from off the loop while storage is
-    // suspended: see `suspend_storage`.
+    // Throws `sqlite::database_suspended`, logged as critical, while storage is suspended.
     void _refuse_while_suspended();
 
     // Client's own queue on Core's loop, rather than the loop's shared one, so that work deferred
