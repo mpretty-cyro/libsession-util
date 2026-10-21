@@ -542,24 +542,6 @@ class Client {
     /// database's: with an unencrypted database the key sits in plaintext beside them.
     void set_cache_dir(std::filesystem::path dir);
 
-    /// Suspends this Client's database before the process is suspended: see
-    /// `core::Core::suspend_storage`, which this wraps and whose arguments and result these are.
-    /// Nothing may touch the database again until `resume_storage()`.
-    ///
-    /// On top of Core's, a Client starts no attachment download while suspended, and keeps what
-    /// arrives meanwhile rather than losing it: an upload, a download or a send that completes
-    /// while suspended is finished when storage resumes.  A send's outcome is also written to a
-    /// small file beside the database, so that if the process is killed while suspended the next
-    /// launch still records it -- otherwise a message that did go out would be marked interrupted.
-    /// Blocking; not to be called on Core's loop.
-    sqlite::Database::suspend_result suspend_storage(
-            std::chrono::milliseconds wait, bool interrupt = false, bool checkpoint = false);
-
-    /// Lifts `suspend_storage`: Core resumes, then everything kept while suspended is finished in
-    /// the order it arrived, and attachment downloads start again.  Safe to call when not
-    /// suspended.
-    void resume_storage();
-
     /// A conversation's picture, decrypted and ready to decode.
     ///
     /// Served from the cache when it is there, and fetched, decrypted and cached when it is not.
@@ -1609,39 +1591,6 @@ class Client {
             bool sync,
             std::optional<std::string_view> swarm_hash);
 
-    // The write half of `_apply_send_status`, without announcing anything.  Returns whether the
-    // message changed.
-    bool _store_send_status(
-            sqlite::Connection& c,
-            int64_t client_id,
-            core::MessageSendStatus status,
-            bool sync,
-            std::optional<std::string_view> swarm_hash);
-
-    // A send's outcome reported while storage was suspended, kept for when it resumes.
-    struct ParkedSendStatus {
-        int64_t client_id;
-        bool sync;
-        core::MessageSendStatus status;
-        std::optional<std::string> swarm_hash;
-    };
-
-    // What was kept while storage was suspended, on the loop: continuations to run on resume in
-    // the order they arrived, and the send outcomes among them, which are also in `_journal_file`.
-    std::vector<std::function<void()>> _when_resumed;
-    std::vector<ParkedSendStatus> _parked_statuses;
-
-    // This Client's file of parked send outcomes, beside the database and named for this instance,
-    // so that two processes sharing the database each write their own; empty for an in-memory
-    // database, which has nothing to outlive the process.  See `suspend_storage`.
-    std::filesystem::path _journal_file;
-    void _write_journal();
-
-    // Records the outcomes in every Client's journal beside the database -- this process's
-    // earlier runs, or another process's -- and removes them.  Facts about sends that did finish,
-    // so applied at start-up before anything still pending is called interrupted.
-    void _apply_journals(sqlite::Connection& c);
-
     // Runs `invoke` against the application's handlers, swallowing and logging anything it throws:
     // a broken listener is not something a data model can do anything about.
     void _emit(std::function<void(const callbacks&)> invoke);
@@ -1763,18 +1712,6 @@ class Client {
     template <typename F>
     void call(F&& f) {
         _jq.call(std::forward<F>(f));
-    }
-    /// As `call`, for a continuation that has to record what it brought -- the network finishing an
-    /// upload or a download -- and so cannot run while storage is suspended: then it is kept, and
-    /// run when storage resumes, rather than refused and lost.
-    template <typename F>
-    void _call_with_storage(F&& f) {
-        call([this, f = std::make_shared<std::decay_t<F>>(std::forward<F>(f))] {
-            if (core.storage_suspended())
-                _when_resumed.push_back([f] { (*f)(); });
-            else
-                (*f)();
-        });
     }
     template <typename F>
     void call_soon(F&& f) {

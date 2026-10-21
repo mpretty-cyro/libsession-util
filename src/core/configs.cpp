@@ -355,20 +355,9 @@ void Configs::push_now() {
     // _load(), so this is the one path that could otherwise skip the check entirely.
     assert(on_loop());
 
-    // Resuming pushes whatever changed meanwhile; see `Core::resume_storage`.
-    if (_push_in_flight || core.storage_suspended())
+    if (_push_in_flight)
         return;
     _send_push();
-}
-
-bool Configs::_unconfirmable() {
-    // Confirming a push writes the dumps, which a suspended database refuses, and a confirmation
-    // only in memory would be lost with the process.  Left dirty, the configs go out again on
-    // resume, which the swarm's merge makes harmless.
-    if (!core.storage_suspended())
-        return false;
-    log::info(cat, "Config push answered while storage is suspended; it will be pushed again");
-    return true;
 }
 
 void Configs::_send_push() {
@@ -466,8 +455,6 @@ void Configs::_send_push() {
                 if (alive.expired())
                     return;
                 _push_in_flight = false;
-                if (_unconfirmable())
-                    return;
 
                 if (!res.ok() || !res.body) {
                     log::warning(
@@ -544,8 +531,6 @@ void Configs::_handle_push_response(
     assert(on_loop());
 
     _push_in_flight = false;
-    if (_unconfirmable())
-        return;
 
     if (!success || !resp) {
         log::warning(
