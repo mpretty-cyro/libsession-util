@@ -306,7 +306,10 @@ namespace opt {
     };
 
     /// Can be used to specify a path to a snode pool cache file that should be used if we are
-    /// unable to bootstrap.
+    /// unable to bootstrap, or to refresh a cache that spans too few subnets from the seed nodes.
+    ///
+    /// The file must be a pool of the network `netid` names: it carries no network of its own, so
+    /// nothing checks this.  A caller with no pool for that network should leave this unset.
     struct fallback_snode_pool_path {
         fs::path path;
         fallback_snode_pool_path(fs::path p) : path{p} {}

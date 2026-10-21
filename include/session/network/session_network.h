@@ -69,6 +69,8 @@ typedef struct session_network_config {
 
     // Snode pool options
     const char* cache_dir;
+    // A pool of the network `netid` names, or NULL: the file carries no network of its own, so
+    // nothing checks it matches (see `opt::fallback_snode_pool_path`).
     const char* fallback_snode_pool_path;
     uint32_t cache_expiration_minutes;
     uint64_t cache_min_lifetime_ms;

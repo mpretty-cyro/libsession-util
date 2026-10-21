@@ -1,5 +1,11 @@
+#include <oxenc/hex.h>
+
 #include <catch2/catch_test_macros.hpp>
+#include <fstream>
+#include <nlohmann/json.hpp>
 #include <session/network/snode_pool.hpp>
+#include <session/random.hpp>
+#include <set>
 
 #include "utils.hpp"
 
@@ -26,10 +32,28 @@ class TestSnodePool : public SnodePool {
         });
     }
 
+    // Off by default: most tests here don't want a cache refresh, and the ones that do turn it on
+    bool real_refresh = false;
+
     void refresh_if_needed(
-            const std::vector<service_node>& /*in_use_nodes*/,
-            std::function<void()> /*on_refresh_complete*/ = nullptr) override {
-        // Do nothing (don't want to trigger a cache refresh)
+            const std::vector<service_node>& in_use_nodes,
+            std::function<void()> on_refresh_complete = nullptr) override {
+        if (real_refresh)
+            SnodePool::refresh_if_needed(in_use_nodes, std::move(on_refresh_complete));
+    }
+
+    // As `reset_state_with_cache`, and with the cache just refreshed, so that its age alone does
+    // not call for another refresh
+    void reset_state_with_fresh_cache(std::vector<service_node> cache) {
+        _jq.call_get([this, cache] {
+            _snode_cache = cache;
+            _snode_strikes.clear();
+            _last_snode_cache_update = std::chrono::system_clock::now();
+        });
+    }
+
+    bool subnet_diversity_relaxed() {
+        return _jq.call_get([this] { return _subnet_diversity_relaxed; });
     }
 
     void debug_queue_post_refresh_callback(std::function<void()> cb) {
@@ -439,4 +463,301 @@ TEST_CASE("Network", "[network][swarm_version_preference]") {
         REQUIRE(!got.empty());
         CHECK(got.front().storage_server_version == old_ss);
     }
+}
+
+namespace {
+
+// `count` nodes spread over `subnets` /24 subnets, each with its own key
+std::vector<service_node> nodes_in_subnets(size_t count, size_t subnets, uint8_t key_tag) {
+    std::vector<service_node> nodes;
+    for (size_t i = 0; i < count; ++i) {
+        std::array<std::byte, 32> key{};
+        key[0] = std::byte{key_tag};
+        key[1] = static_cast<std::byte>(i);
+        nodes.emplace_back(service_node{
+                ed25519_pubkey::from_bytes(key),
+                oxen::quic::ipv4{"10.{}.{}.{}"_format(key_tag, i % subnets, i / subnets + 1)},
+                static_cast<uint16_t>(20000 + i),
+                static_cast<uint16_t>(30000 + i),
+                {2, 11, 0},
+                0});
+    }
+    return nodes;
+}
+
+size_t distinct_subnets(const std::vector<service_node>& nodes) {
+    std::set<uint32_t> subnets;
+    for (const auto& node : nodes)
+        subnets.insert(node.ip.to_base(24).addr);
+    return subnets.size();
+}
+
+// The pool's refresh requests, answered by hand: each is held until the test replies to it, on the
+// loop, as the transport would.
+struct HeldRefreshes {
+    std::mutex mutex;
+    std::vector<std::pair<Request, network_response_callback_t>> requests;
+
+    SnodePool::network_fetcher_t fetcher() {
+        return [this](Request request, network_response_callback_t cb) {
+            std::lock_guard lock{mutex};
+            requests.emplace_back(std::move(request), std::move(cb));
+        };
+    }
+
+    // Waits for the next request, so that a refresh started asynchronously has got as far as
+    // asking someone
+    std::optional<std::pair<Request, network_response_callback_t>> next() {
+        for (int i = 0; i < 200; ++i) {
+            {
+                std::lock_guard lock{mutex};
+                if (!requests.empty()) {
+                    auto front = std::move(requests.front());
+                    requests.erase(requests.begin());
+                    return front;
+                }
+            }
+            std::this_thread::sleep_for(10ms);
+        }
+        return std::nullopt;
+    }
+};
+
+session::network::config::SnodePool subnet_config(
+        std::vector<service_node> seed_nodes,
+        std::optional<std::filesystem::path> prepackaged = std::nullopt) {
+    return {std::nullopt,
+            std::move(prepackaged),
+            5min,
+            0ms,   // cache_min_lifetime
+            true,  // enforce_subnet_diversity
+            network::opt::retry_delay{10ms, 20ms},
+            opt::netid::Target::testnet,
+            std::move(seed_nodes),
+            12,  // cache_min_size
+            0,
+            3,  // cache_num_nodes_to_use_for_refresh
+            2,
+            3,  // cache_node_strike_threshold
+            std::nullopt};
+}
+
+}  // namespace
+
+TEST_CASE(
+        "SnodePool: a cache with too few subnets refreshes from the seed nodes",
+        "[network][subnets]") {
+    // 20 nodes over 2 subnets: enough by count, too few to give 3 nodes from distinct subnets.
+    // Before, the refresh check saw enough nodes and called back at once, and a path build
+    // retrying on that callback failed the same way without end.
+    auto seed = nodes_in_subnets(1, 1, 99);
+    auto cramped = nodes_in_subnets(20, 2, 1);
+    auto diverse = nodes_in_subnets(30, 30, 2);
+
+    auto loop = std::make_shared<oxen::quic::Loop>();
+    auto disk_loop = std::make_shared<oxen::quic::Loop>();
+    HeldRefreshes held;
+    auto pool =
+            std::make_shared<TestSnodePool>(subnet_config(seed), *loop, *disk_loop, held.fetcher());
+    pool->reset_state_with_fresh_cache(cramped);
+    pool->real_refresh = true;
+
+    CHECK(pool->get_unused_nodes(3).size() == 2);
+
+    std::atomic<int> refreshed{0};
+    pool->refresh_if_needed({}, [&] { refreshed++; });
+    auto request = held.next();
+    REQUIRE(request);
+    // Asked of the seed node rather than of the cramped cache's own nodes, and not called back
+    // before it answered
+    REQUIRE(std::holds_alternative<service_node>(request->first.destination));
+    CHECK(std::get<service_node>(request->first.destination).remote_pubkey ==
+          seed[0].remote_pubkey);
+    CHECK(refreshed == 0);
+
+    SECTION("which fixes it") {
+        auto bin = to_snode_cache_bin(diverse);
+        loop->call_get([&] {
+            request->second(
+                    true,
+                    false,
+                    200,
+                    {},
+                    std::string{reinterpret_cast<const char*>(bin.data()), bin.size()});
+        });
+        loop->call_get([] {});
+        CHECK(refreshed == 1);
+
+        auto nodes = pool->get_unused_nodes(3);
+        CHECK(nodes.size() == 3);
+        CHECK(distinct_subnets(nodes) == 3);
+        CHECK_FALSE(pool->subnet_diversity_relaxed());
+    }
+
+    SECTION("which still has too few, so diversity gives way until the next refresh") {
+        auto still_cramped = nodes_in_subnets(20, 2, 3);
+        auto bin = to_snode_cache_bin(still_cramped);
+        loop->call_get([&] {
+            request->second(
+                    true,
+                    false,
+                    200,
+                    {},
+                    std::string{reinterpret_cast<const char*>(bin.data()), bin.size()});
+        });
+        loop->call_get([] {});
+        CHECK(refreshed == 1);
+
+        auto nodes = pool->get_unused_nodes(3);
+        CHECK(nodes.size() == 3);
+        CHECK(pool->subnet_diversity_relaxed());
+        // Both subnets used, so only one is shared
+        CHECK(distinct_subnets(nodes) == 2);
+
+        // The next refresh is judged afresh
+        pool->update_cache(diverse);
+        CHECK_FALSE(pool->subnet_diversity_relaxed());
+        CHECK(distinct_subnets(pool->get_unused_nodes(3)) == 3);
+    }
+
+    SECTION("which cannot reach the seed nodes, so diversity gives way") {
+        loop->call_get([&] { request->second(false, true, 0, {}, std::nullopt); });
+        // The failed request is retried after `retry_delay`, finds no seed node left, and gives up
+        for (int i = 0; i < 200 && refreshed == 0; ++i)
+            std::this_thread::sleep_for(10ms);
+        CHECK(refreshed == 1);
+        CHECK(pool->subnet_diversity_relaxed());
+        CHECK(pool->get_unused_nodes(3).size() == 3);
+        // The cramped cache is kept rather than replaced
+        CHECK(pool->size() == cramped.size());
+    }
+}
+
+TEST_CASE(
+        "SnodePool: with the seed nodes out of reach, a cache with too few subnets is replaced by "
+        "a prepackaged pool that spans more",
+        "[network][subnets]") {
+    auto seed = nodes_in_subnets(1, 1, 99);
+    auto cramped = nodes_in_subnets(20, 2, 1);
+    auto prepackaged_nodes = nodes_in_subnets(25, 25, 4);
+
+    auto dir = std::filesystem::temp_directory_path() /
+               "snode-pool-prepackaged-{}"_format(random::unique_id("t"));
+    std::filesystem::create_directories(dir);
+    auto path = dir / "service_nodes.json";
+    {
+        nlohmann::json states = nlohmann::json::array();
+        for (const auto& node : prepackaged_nodes)
+            states.push_back(
+                    {{"pubkey_ed25519", oxenc::to_hex(node.view_remote_key())},
+                     {"public_ip", node.ip.to_string()},
+                     {"storage_https_port", node.https_port},
+                     {"storage_lmq_port", node.omq_port},
+                     {"swarm_id", node.swarm_id},
+                     {"requested_unlock_height", 0}});
+        std::ofstream{path} << nlohmann::json{{"height", 1}, {"service_node_states", states}};
+    }
+
+    auto loop = std::make_shared<oxen::quic::Loop>();
+    auto disk_loop = std::make_shared<oxen::quic::Loop>();
+    HeldRefreshes held;
+    auto pool = std::make_shared<TestSnodePool>(
+            subnet_config(seed, path), *loop, *disk_loop, held.fetcher());
+    pool->reset_state_with_fresh_cache(cramped);
+    pool->real_refresh = true;
+
+    CHECK(pool->get_unused_nodes(3).size() == 2);
+    std::atomic<int> refreshed{0};
+    pool->refresh_if_needed({}, [&] { refreshed++; });
+    auto request = held.next();
+    REQUIRE(request);
+    loop->call_get([&] { request->second(false, true, 0, {}, std::nullopt); });
+    for (int i = 0; i < 200 && refreshed == 0; ++i)
+        std::this_thread::sleep_for(10ms);
+    CHECK(refreshed == 1);
+
+    CHECK(pool->size() == prepackaged_nodes.size());
+    auto nodes = pool->get_unused_nodes(3);
+    CHECK(nodes.size() == 3);
+    CHECK(distinct_subnets(nodes) == 3);
+    CHECK_FALSE(pool->subnet_diversity_relaxed());
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE(
+        "SnodePool: a caller retrying on every refresh callback stops once subnets give way",
+        "[network][subnets]") {
+    // What the onion request router does when it cannot fill a path: ask for a refresh, and retry
+    // when called back.  With a refresh check that ignored subnets, the callback came back at once,
+    // inline, and this recursed until the process ran out of memory.
+    auto seed = nodes_in_subnets(1, 1, 99);
+    auto cramped = nodes_in_subnets(20, 2, 1);
+
+    auto loop = std::make_shared<oxen::quic::Loop>();
+    auto disk_loop = std::make_shared<oxen::quic::Loop>();
+    HeldRefreshes held;
+    auto pool =
+            std::make_shared<TestSnodePool>(subnet_config(seed), *loop, *disk_loop, held.fetcher());
+    pool->reset_state_with_fresh_cache(cramped);
+    pool->real_refresh = true;
+
+    // An existing path, as the router excludes it when building the next
+    std::vector<service_node> in_use{cramped[0], cramped[1], cramped[2]};
+
+    std::atomic<int> attempts{0};
+    std::atomic<bool> built{false};
+    std::function<void()> build = [&] {
+        if (++attempts > 50)
+            return;
+        if (pool->get_unused_nodes(3, in_use).size() >= 3)
+            built = true;
+        else
+            pool->refresh_if_needed(in_use, build);
+    };
+    loop->call_get([&] { build(); });
+
+    // Waiting on the seed nodes, not retrying
+    auto request = held.next();
+    REQUIRE(request);
+    CHECK(attempts == 1);
+    CHECK_FALSE(built);
+
+    // The seed nodes' network is just as cramped, so diversity gives way and the retry succeeds
+    auto bin = to_snode_cache_bin(nodes_in_subnets(20, 2, 5));
+    loop->call_get([&] {
+        request->second(
+                true,
+                false,
+                200,
+                {},
+                std::string{reinterpret_cast<const char*>(bin.data()), bin.size()});
+    });
+    loop->call_get([] {});
+    CHECK(built);
+    CHECK(attempts == 2);
+}
+
+TEST_CASE(
+        "SnodePool: with no seed nodes, a cache with too few subnets gives way rather than "
+        "waiting",
+        "[network][subnets]") {
+    auto cramped = nodes_in_subnets(20, 2, 1);
+
+    auto loop = std::make_shared<oxen::quic::Loop>();
+    auto disk_loop = std::make_shared<oxen::quic::Loop>();
+    HeldRefreshes held;
+    auto pool =
+            std::make_shared<TestSnodePool>(subnet_config({}), *loop, *disk_loop, held.fetcher());
+    pool->reset_state_with_fresh_cache(cramped);
+    pool->real_refresh = true;
+
+    CHECK(pool->get_unused_nodes(3).size() == 2);
+    std::atomic<int> refreshed{0};
+    pool->refresh_if_needed({}, [&] { refreshed++; });
+    for (int i = 0; i < 200 && refreshed == 0; ++i)
+        std::this_thread::sleep_for(10ms);
+    CHECK(refreshed == 1);
+    CHECK(pool->subnet_diversity_relaxed());
+    CHECK(distinct_subnets(pool->get_unused_nodes(3)) == 2);
 }

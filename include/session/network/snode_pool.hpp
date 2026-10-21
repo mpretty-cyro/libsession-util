@@ -21,6 +21,8 @@ namespace session::network {
 namespace config {
     struct SnodePool {
         std::optional<std::filesystem::path> cache_directory;
+        // A pool of the network `netid` names, which nothing checks (see
+        // `opt::fallback_snode_pool_path`).
         std::optional<std::filesystem::path> fallback_snode_pool_path;
         std::chrono::minutes cache_expiration;
         std::chrono::milliseconds cache_min_lifetime;
@@ -140,6 +142,20 @@ class SnodePool : public std::enable_shared_from_this<SnodePool> {
     std::vector<std::vector<std::byte>> _snode_refresh_results;
     std::vector<std::function<void()>> _after_snode_cache_refresh;
 
+    // Subnet diversity, when the cache holds enough usable nodes but too few distinct /24 subnets
+    // to fill a request from them (see `get_unused_nodes`).  The pool first refreshes from the
+    // seed nodes, which are trusted and return the whole network, or if they cannot be reached
+    // from the prepackaged pool if that spans more subnets.  Only if the result still has too few
+    // does it relax diversity, sharing as few subnets as it can, and only until the next refresh
+    // replaces the cache.
+    //
+    // `_subnet_shortfall` asks for that seed refresh, `_refreshing_for_subnets` marks the refresh
+    // in progress as being it, and `_cache_from_subnet_refresh` marks the cache as its result.
+    bool _subnet_shortfall = false;
+    bool _refreshing_for_subnets = false;
+    bool _cache_from_subnet_refresh = false;
+    bool _subnet_diversity_relaxed = false;
+
     /// This pool's own jobs, rather than the loop's shared queue, so that ~SnodePool can take them
     /// away from the loop before anything is torn down: `stop()` waits out whatever is running and
     /// cancels the rest, including anything scheduled with call_later.  That is what lets the jobs
@@ -159,6 +175,16 @@ class SnodePool : public std::enable_shared_from_this<SnodePool> {
 
     // Refresh functions
     void _refresh_snode_cache(std::optional<std::string> request_id = std::nullopt);
+    void _run_after_refresh_callbacks();
+    // Ends a refresh for subnet diversity that the seed nodes could not serve, `why`: with the
+    // prepackaged pool if it spans more subnets than the cache, otherwise by relaxing diversity
+    void _end_subnet_refresh_without_seed_nodes(
+            const std::string& request_id, std::string_view why);
+    // The prepackaged pool at `fallback_snode_pool_path`, or nullopt if there is none or it cannot
+    // be used
+    std::optional<std::vector<service_node>> _load_fallback_pool(const std::string& request_id);
+    // How many distinct /24 subnets the nodes without too many strikes span
+    size_t _usable_subnet_count(const std::vector<service_node>& nodes) const;
     void _launch_next_refresh_request(
             const std::string& request_id,
             const uint8_t index,
