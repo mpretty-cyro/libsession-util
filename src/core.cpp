@@ -2069,12 +2069,19 @@ CREATE TABLE IF NOT EXISTS migrations_applied (
 ) STRICT
 )");
 
+    // Read once up front, and again inside each transaction before applying anything: another
+    // process on the same file -- the app and its notification extension, opening together just
+    // after an update -- can be applying the same migrations, and the one that waited for the write
+    // lock would otherwise re-run what the other just committed and fail.  The read inside is
+    // current only because `write_transaction` takes the write lock at BEGIN.
     std::unordered_set<std::string> applied;
-    {
+    auto load_applied = [&] {
+        applied.clear();
         SQLite::Statement st{conn.sql, "SELECT name FROM migrations_applied"};
         while (st.executeStep())
             applied.insert(get<std::string>(st));
-    }
+    };
+    load_applied();
 
     log::debug(cat, "Checking schema migrations");
 
@@ -2105,23 +2112,37 @@ CREATE TABLE IF NOT EXISTS migrations_applied (
         // digit, so this cannot collide with one.
         auto created_key = owner.empty() ? std::string{"@created"} : "{}:@created"_format(owner);
 
-        if (!full_schema.empty() && !applied.count(created_key) &&
-            std::ranges::none_of(migrations, [&](const auto& m) {
-                return applied.count(key_for(m.name)) > 0;
-            })) {
-            try {
-                log::info(
-                        cat, "Creating {} schema from full_schema", owner.empty() ? "core" : owner);
+        auto needs_full_schema = [&] {
+            return !full_schema.empty() && !applied.count(created_key) &&
+                   std::ranges::none_of(migrations, [&](const auto& m) {
+                       return applied.count(key_for(m.name)) > 0;
+                   });
+        };
 
+        if (needs_full_schema()) {
+            try {
                 auto tx = write_transaction(conn);
 
-                conn.sql.exec(std::string{full_schema});
-                conn.prepared_exec("INSERT INTO migrations_applied (name) VALUES (?)", created_key);
-                for (const auto& m : migrations)
-                    conn.prepared_exec(
-                            "INSERT INTO migrations_applied (name) VALUES (?)", key_for(m.name));
+                // Built by another process while this one waited for the lock: its migrations are
+                // recorded as applied too, so the loop below finds nothing left to do.
+                load_applied();
+                if (needs_full_schema()) {
+                    log::info(
+                            cat,
+                            "Creating {} schema from full_schema",
+                            owner.empty() ? "core" : owner);
 
-                tx.commit();
+                    conn.sql.exec(std::string{full_schema});
+                    conn.prepared_exec(
+                            "INSERT INTO migrations_applied (name) VALUES (?)", created_key);
+                    for (const auto& m : migrations)
+                        conn.prepared_exec(
+                                "INSERT INTO migrations_applied (name) VALUES (?)",
+                                key_for(m.name));
+
+                    tx.commit();
+                    return;
+                }
             } catch (const std::exception& e) {
                 log::critical(
                         cat,
@@ -2130,7 +2151,6 @@ CREATE TABLE IF NOT EXISTS migrations_applied (
                         e.what());
                 throw;
             }
-            return;
         }
 
         for (const auto& [name, apply] : migrations) {
@@ -2141,10 +2161,15 @@ CREATE TABLE IF NOT EXISTS migrations_applied (
             }
 
             try {
-                log::info(cat, "Applying database schema migration {}", key);
-
                 auto tx = write_transaction(conn);
 
+                load_applied();
+                if (applied.count(key)) {
+                    log::debug(cat, "Schema migration {} applied by another connection", key);
+                    continue;
+                }
+
+                log::info(cat, "Applying database schema migration {}", key);
                 apply(conn, *this);
                 conn.prepared_exec("INSERT INTO migrations_applied (name) VALUES (?)", key);
 
