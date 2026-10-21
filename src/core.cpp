@@ -94,10 +94,10 @@ void Core::init() {
         if (waited == 0ms)
             log::info(cat, "Database work is waiting for storage to resume");
         else
-            log::critical(
+            log::warning(
                     cat,
-                    "Database work has waited {} for storage to resume: whatever suspended it has "
-                    "not resumed it",
+                    "Database work has waited {} for storage to resume; if this keeps growing, "
+                    "whatever suspended it has not resumed it",
                     waited);
     });
     db.on_refused([] {
@@ -144,6 +144,11 @@ Core::~Core() {
         _network->on_connection_lost = nullptr;
     }
 
+    // First, before anything below waits on the loop: a job waiting for storage to resume would
+    // otherwise keep the loop, and every call_get here, waiting for ever.  It runs to its end
+    // instead, as it would have on resume.
+    db.resume();
+
     // Before the Network goes, because a poll or a renew that fires while it is being torn down
     // would reach it; stopping `_jq` below cancels them too, but only once the Network is already
     // gone.  On the loop because the ids are only ever touched there.
@@ -154,10 +159,6 @@ Core::~Core() {
 
     // Blocking, and it must not run on the Network's own loop -- it does not, because a Core is
     // destroyed by whoever owns it.  Before the queue is stopped rather than after: tearing the
-    // A job waiting for storage to resume would otherwise keep the loop, and the call_get below,
-    // waiting for ever.  It runs to its end instead, as it would have on resume.
-    db.resume();
-
     // Network down fails whatever it still holds, and those completions marshal onto our queue,
     // which throws if it has already been stopped.  Queued here they are simply cancelled below.
     _network.reset();
@@ -262,6 +263,13 @@ void Core::set_network(std::unique_ptr<network::Network> network) {
 sqlite::Database::suspend_result Core::suspend_storage(
         std::chrono::milliseconds wait, bool interrupt, bool checkpoint) {
     std::lock_guard lock{_suspend_mutex};
+
+    // Already suspended, the loop may be holding a job that waits for the resume, so a call_get
+    // here would wait for it too -- for ever, if this thread is the one to resume.  Everything on
+    // the loop was done by the first suspend; only the pool's part is worth repeating.
+    if (_storage_suspended)
+        return db.suspend(wait, interrupt, checkpoint);
+
     // On the loop, so it lands between jobs: no Core job is part-way through a transaction, and
     // from here any that wants the database waits for the resume.
     call_get([this] {

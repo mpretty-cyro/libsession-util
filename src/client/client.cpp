@@ -746,7 +746,7 @@ Client::~Client() {
 }
 
 void Client::_refuse_while_suspended() {
-    if (!core.storage_suspended() || core.loop().inside())
+    if (!core.storage_suspended())
         return;
     log::critical(
             cat,
