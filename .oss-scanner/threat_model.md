@@ -132,8 +132,7 @@ Least:
 
 ## How we rate severity
 
-**PROPOSAL — not yet agreed by the maintainers.** Rate by what an in-scope adversary achieves, not
-by bug class alone.
+Rate by what an in-scope adversary achieves, not by bug class alone.
 
 - **Critical**
   - Code execution, or a memory-corruption bug with a credible path to it, reachable remotely
