@@ -36,8 +36,9 @@ RUN for repo in session-storage-server session-file-server session-pysogs sessio
 COPY . /src
 WORKDIR /src
 
-# The scanner clones without submodules. All of them are needed, not only the ones this
-# configuration compiles: external/CMakeLists.txt refuses to configure if any is missing or stale.
+# The scanner clones without submodules. All of them are fetched, not only the ones this
+# configuration compiles: external/CMakeLists.txt checks most of them, ios-cmake and protobuf
+# included, and refuses to configure if one is missing or stale.
 RUN git submodule update --init --recursive --depth 1 --jobs 8
 
 # Debug, because libsession's threading and state checks are asserts that a release build drops.
@@ -86,5 +87,5 @@ RUN mkdir -p /src/build-asan/static-deps-sources/src \
 # A smoke test, not a gate: a failing test should reach the maintainers as a report, not as a
 # build failure that stops the scan.
 RUN cd /src/build \
-    && (timeout 900 ./tests/testLogging && timeout 900 ./tests/testAll \
-        || echo "WARNING: libsession tests reported failures")
+    && { timeout 900 ./tests/testLogging || echo "WARNING: testLogging reported failures"; } \
+    && { timeout 900 ./tests/testAll || echo "WARNING: testAll reported failures"; }

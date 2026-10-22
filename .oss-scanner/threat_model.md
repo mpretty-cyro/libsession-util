@@ -65,13 +65,14 @@ In scope:
   such as displacing a device by re-dating messages, is a finding.
 - **A malicious file, community or Pro server**, or anything able to answer in its place.
 - **A holder of the account's seed, a removed device included.** The design lets a seed holder act
-  as the account: register a device of its own, displace members, dissolve groups, publish account
-  keys, delete messages. It answers with notification rather than prevention: every member tells
-  its user (`docs/protocol-v2.md`, "Removed devices" and "Displaced devices"). So the findings here
-  are:
-  - any such action the user is *not* told about;
+  as the account and does not try to prevent it (`docs/protocol-v2.md`, "Removed devices" and
+  "Displaced devices"): it can publish account keys of its own, delete the account's messages,
+  register a device in the device group, displace its members or dissolve it. Those that reach the
+  device group are announced to every member's user instead. So the findings here are:
+  - a device added, a member displaced or a group dissolved without the user being told;
   - anything a removed device can still read after the members' device keys have rotated;
-  - decrypting past one-to-one messages, the PFS goal stated at the top of `docs/protocol-v2.md`;
+  - a *passive* seed holder, one who reads stored messages but does not act, decrypting one-to-one
+    messages: past, present or future, the PFS goal stated at the top of `docs/protocol-v2.md`;
   - joining a device group through a link request without the user seeing an SAS mismatch.
 - **A passive network observer or storage-server operator** logging everything for later
   decryption.
@@ -83,8 +84,8 @@ Out of scope:
   the protected places, into logs, temporary files or unlocked memory, is in scope.)
 - SQL injection through session-sqlite: every query is prepared. What the library itself wrote to
   its database is trusted when read back; what it stores from the network is not.
-- What the design lets a seed holder do, when the user is told of it (see above). Holding the seed
-  *is* holding the account.
+- Everything else the design lets a seed holder do (see above), such as receiving a contact's future
+  messages by publishing account keys of its own. Holding the seed *is* holding the account.
 - Denial of service that the protocol cannot prevent: a swarm withholding all messages, a server
   refusing to answer, flooding with valid traffic.
 
@@ -142,8 +143,8 @@ Rate by what an in-scope adversary achieves, not by bug class alone.
     keys, group keys), to a party not entitled to it.
   - Forging a message, config, device-group message or link request that the victim accepts as
     authentic from someone else; joining a closed group or device group without being admitted.
-  - Breaking the PFS guarantee: a root-seed holder or passive logger can decrypt past one-to-one
-    messages.
+  - Breaking the PFS guarantee: a passive holder of the seed, or someone who logged stored messages
+    and later obtains it, can decrypt one-to-one messages, past, present or future.
 - **High**
   - Memory-safety bugs (out-of-bounds read or write, use-after-free, double free, uninitialised
     read) reachable from untrusted input, without a demonstrated exploit.
