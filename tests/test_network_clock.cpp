@@ -2,7 +2,10 @@
 #include <session/network/session_network.hpp>
 #include <vector>
 
-using namespace session::network;
+#include "test_helper.hpp"
+#include "utils.hpp"
+
+using namespace session;
 using namespace std::literals;
 
 namespace {
@@ -10,7 +13,7 @@ namespace {
 std::optional<std::chrono::milliseconds> resync(
         std::vector<std::optional<std::chrono::milliseconds>> measured,
         std::chrono::milliseconds min_offset = 5s) {
-    return detail::resync_offset(measured, min_offset);
+    return network::detail::resync_offset(measured, min_offset);
 }
 
 }  // namespace
@@ -49,6 +52,34 @@ TEST_CASE(
 }
 
 TEST_CASE("Network clock: the default minimum offset is five seconds", "[network]") {
-    CHECK(config::Config{}.min_network_offset == 5s);
-    CHECK(config::Config{opt::min_network_offset{2s}}.min_network_offset == 2s);
+    CHECK(network::config::Config{}.min_network_offset == 5s);
+    CHECK(network::config::Config{network::opt::min_network_offset{2s}}.min_network_offset == 2s);
+}
+
+TEST_CASE("Network clock: a resync sets the offset and reports it to the client", "[network]") {
+    ScopedClockOffset restore{0ms};
+    network::Network net{network::config::Config{}};
+
+    std::optional<std::chrono::milliseconds> reported;
+    net.on_network_info_changed = [&](std::chrono::milliseconds offset, int, int) {
+        reported = offset;
+    };
+
+    // Not retrieved until a resync has succeeded, and a resync whose requests all failed has not.
+    CHECK_FALSE(net.has_retrieved_time_offset());
+    TestHelper::finish_clock_resync(net, {std::nullopt, std::nullopt, std::nullopt});
+    CHECK_FALSE(net.has_retrieved_time_offset());
+    CHECK_FALSE(reported);
+
+    TestHelper::finish_clock_resync(net, {-8s, -7s, -9s});
+    CHECK(net.has_retrieved_time_offset());
+    CHECK(net.network_time_offset() == -8s);
+    CHECK(reported == -8s);
+
+    // The device's clock has been fixed: the offset goes back to zero rather than staying put, and
+    // the client hears about it.
+    TestHelper::finish_clock_resync(net, {400ms, -100ms, 1s});
+    CHECK(net.has_retrieved_time_offset());
+    CHECK(net.network_time_offset() == 0ms);
+    CHECK(reported == 0ms);
 }

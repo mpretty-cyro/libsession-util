@@ -109,7 +109,7 @@ class Network {
     virtual ~Network();
 
     bool has_retrieved_time_offset() const {
-        return (_last_successful_clock_resync == std::chrono::steady_clock::time_point{});
+        return (_last_successful_clock_resync != std::chrono::steady_clock::time_point{});
     };
     std::chrono::milliseconds network_time_offset() const {
         return std::chrono::duration_cast<std::chrono::milliseconds>(AdjustedClock::get_offset());
