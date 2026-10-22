@@ -323,7 +323,21 @@ OnionRequestRouter::OnionRequestRouter(
         _edge_node_cache_file_path = *_config.cache_directory / cache_file_name;
         _load_from_disk();
     }
+}
 
+std::shared_ptr<OnionRequestRouter> OnionRequestRouter::make(
+        config::OnionRequestRouter config,
+        oxen::quic::Loop& loop,
+        oxen::quic::Loop& disk_loop,
+        std::weak_ptr<SnodePool> snode_pool,
+        std::weak_ptr<ITransport> transport) {
+    auto router = loop.make_shared<OnionRequestRouter>(
+            std::move(config), loop, disk_loop, std::move(snode_pool), std::move(transport));
+    router->_start_setup();
+    return router;
+}
+
+void OnionRequestRouter::_start_setup() {
     _jq.call_soon([this] {
         auto snode_pool = _snode_pool.lock();
         if (!snode_pool) {
