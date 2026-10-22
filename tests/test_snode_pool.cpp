@@ -967,3 +967,16 @@ TEST_CASE(
     std::lock_guard lock{held.mutex};
     CHECK(held.requests.empty());
 }
+
+TEST_CASE("Network config: subnet diversity is enforced on mainnet only", "[network][subnets]") {
+    // Every testnet node is run by one party, and devnet nodes by a developer, whatever their
+    // addresses; testnet's 26 nodes span only 12 /24 subnets, exactly what four paths need.
+    using network::config::Config;
+    CHECK(Config{}.enforce_subnet_diversity);
+    CHECK(Config{opt::netid::mainnet()}.enforce_subnet_diversity);
+    CHECK_FALSE(Config{opt::netid::testnet()}.enforce_subnet_diversity);
+    CHECK_FALSE(Config{opt::netid::devnet(nodes_in_subnets(1, 1, 9))}.enforce_subnet_diversity);
+    // And the explicit option still turns it off on mainnet
+    CHECK_FALSE(Config{opt::netid::mainnet(), opt::disable_subnet_diversity{}}
+                        .enforce_subnet_diversity);
+}

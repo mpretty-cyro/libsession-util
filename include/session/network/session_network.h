@@ -57,6 +57,7 @@ typedef struct session_network_config {
     // General options
     bool increase_no_file_limit;
     uint8_t path_length;
+    // Ignored, and treated as false, for a testnet or devnet `netid`
     bool enforce_subnet_diversity;
     uint64_t min_retry_delay_ms;
     uint64_t max_retry_delay_ms;
