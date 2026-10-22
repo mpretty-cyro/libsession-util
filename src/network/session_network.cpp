@@ -1237,7 +1237,6 @@ LIBSESSION_C_API session_network_config session_network_config_default() {
             std::chrono::duration_cast<std::chrono::minutes>(
                     cpp_defaults.min_resume_clock_resync_interval)
                     .count();
-    config.min_network_offset_ms = cpp_defaults.min_network_offset.count();
 
     config.devnet_seed_nodes = nullptr;
     config.devnet_seed_nodes_size = 0;
@@ -1370,11 +1369,6 @@ LIBSESSION_C_API bool session_network_init(
         if (config->min_resume_clock_resync_interval_minutes > 0)
             cpp_opts.emplace_back(opt::min_resume_clock_resync_interval{
                     std::chrono::minutes{config->min_resume_clock_resync_interval_minutes}});
-
-        // Unlike its neighbours, 0 is not "the default" here: it is the setting that applies every
-        // offset.  `session_network_config_default` fills in the real default.
-        cpp_opts.emplace_back(
-                opt::min_network_offset{std::chrono::milliseconds{config->min_network_offset_ms}});
 
         // Snode cache
         if (config->cache_dir)

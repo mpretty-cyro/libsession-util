@@ -62,9 +62,6 @@ typedef struct session_network_config {
     uint64_t max_retry_delay_ms;
     uint8_t num_nodes_to_check_for_network_offset;
     uint32_t min_resume_clock_resync_interval_minutes;
-    /// The smallest network offset that is applied; a smaller median offset leaves the device clock
-    /// as it is.  0 applies every offset.
-    uint32_t min_network_offset_ms;
 
     // Devnet options (only used when netid_target == SESSION_NETWORK_DEVNET)
     const network_service_node* devnet_seed_nodes;
