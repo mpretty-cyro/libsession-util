@@ -447,6 +447,10 @@ class TestHelper {
     static void set_router(network::Network& net, std::shared_ptr<network::IRouter> router) {
         net._router = std::move(router);
     }
+    /// Reports `status` as the Network's own, on its loop, as a transport or router changing would.
+    static void network_status(network::Network& net, network::ConnectionStatus status) {
+        net._jq->call_get([&] { net._update_status(status); });
+    }
     static network::SnodePool& snode_pool(network::Network& net) { return *net._snode_pool; }
     static oxen::quic::Loop& disk_loop(network::Network& net) { return *net._disk_loop; }
 

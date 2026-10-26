@@ -113,9 +113,9 @@ Core::~Core() {
     // same courtesy for the same reason, and doing it here rather than by shuffling the member
     // declarations leaves the requirement stated instead of resting on where a field sits.
     if (_network) {
-        _network->on_server_push = nullptr;
-        _network->on_connection_established = nullptr;
-        _network->on_connection_lost = nullptr;
+        _network->set_on_server_push(nullptr);
+        _network->set_on_connection_established(nullptr);
+        _network->set_on_connection_lost(nullptr);
     }
 
     // Before the Network goes, because a poll or a renew that fires while it is being torn down
@@ -197,22 +197,22 @@ void Core::set_network(std::unique_ptr<network::Network> network) {
         // everything here is authenticated downstream, replays dedup on the swarm hash, and
         // configs merge by seqno, so the worst a connected node achieves by pushing us something
         // is making us do work we would have done anyway.
-        _network->on_server_push = [this](const network::ed25519_pubkey& /*node*/,
-                                          std::string_view endpoint,
-                                          std::span<const std::byte> body) {
+        _network->set_on_server_push([this](const network::ed25519_pubkey& /*node*/,
+                                            std::string_view endpoint,
+                                            std::span<const std::byte> body) {
             call([this, endpoint = std::string{endpoint}, body = to_vector(body)] {
                 _handle_server_push(endpoint, body);
             });
-        };
+        });
 
-        _network->on_connection_lost = [this](const network::ed25519_pubkey& node) {
+        _network->set_on_connection_lost([this](const network::ed25519_pubkey& node) {
             call([this, node] {
                 if (_sub_node && _sub_node->remote_pubkey == node)
                     _drop_subscription("connection lost");
             });
-        };
+        });
 
-        _network->on_connection_established = [this](const network::ed25519_pubkey& node) {
+        _network->set_on_connection_established([this](const network::ed25519_pubkey& node) {
             call([this, node] {
                 // A rebuilt connection carries no subscription: the far end keyed the old one to
                 // the connection that just went away.  Losing it should already have dropped us,
@@ -220,7 +220,7 @@ void Core::set_network(std::unique_ptr<network::Network> network) {
                 if (_subscribed && _sub_node && _sub_node->remote_pubkey == node)
                     _drop_subscription("connection was re-established");
             });
-        };
+        });
     }
 
     _update_polling();

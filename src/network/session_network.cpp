@@ -286,20 +286,20 @@ Network::Network(config::Config _conf) :
     _transport->on_status_changed = [this] { _recalculate_status(); };
 
     // Pass the transport's inbound signals through to whoever owns us.  Read each hook once into
-    // a local: our owner may replace it, and these fire on the loop rather than from the thread
-    // that would be doing the replacing.
+    // a local: a hook may replace itself while it runs, and the copy is what keeps the running one
+    // alive.
     _transport->on_server_push = [this](const ed25519_pubkey& node,
                                         std::string_view endpoint,
                                         std::span<const std::byte> body) {
-        if (auto cb = on_server_push)
+        if (auto cb = _on_server_push)
             cb(node, endpoint, body);
     };
     _transport->on_connection_established = [this](const ed25519_pubkey& node) {
-        if (auto cb = on_connection_established)
+        if (auto cb = _on_connection_established)
             cb(node);
     };
     _transport->on_connection_lost = [this](const ed25519_pubkey& node) {
-        if (auto cb = on_connection_lost)
+        if (auto cb = _on_connection_lost)
             cb(node);
     };
 
@@ -728,14 +728,39 @@ void Network::_recalculate_status() {
     });
 }
 
+void Network::set_on_status_changed(std::function<void(ConnectionStatus status)> hook) {
+    _set_hook(_on_status_changed, std::move(hook));
+}
+
+void Network::set_on_network_info_changed(
+        std::function<void(
+                std::chrono::milliseconds network_time_offset, int hardfork, int softfork)> hook) {
+    _set_hook(_on_network_info_changed, std::move(hook));
+}
+
+void Network::set_on_server_push(std::function<
+                                 void(const ed25519_pubkey& node,
+                                      std::string_view endpoint,
+                                      std::span<const std::byte> body)> hook) {
+    _set_hook(_on_server_push, std::move(hook));
+}
+
+void Network::set_on_connection_established(std::function<void(const ed25519_pubkey& node)> hook) {
+    _set_hook(_on_connection_established, std::move(hook));
+}
+
+void Network::set_on_connection_lost(std::function<void(const ed25519_pubkey& node)> hook) {
+    _set_hook(_on_connection_lost, std::move(hook));
+}
+
 void Network::_update_status(ConnectionStatus new_status) {
     if (_status == new_status)
         return;
 
     _status = new_status;
 
-    if (on_status_changed)
-        on_status_changed(new_status);
+    if (auto cb = _on_status_changed)
+        cb(new_status);
 }
 
 Request Network::_preprocess_request(Request request) {
@@ -856,15 +881,14 @@ void Network::_update_network_state(const std::string& body) {
         }
 
         // If the network info changed then call the callback
-        if (on_network_info_changed) {
+        if (auto cb = _on_network_info_changed) {
             auto new_versions = _fork_versions.load();
 
             if (new_versions != old_versions)
-                on_network_info_changed(
-                        std::chrono::duration_cast<std::chrono::milliseconds>(
-                                AdjustedClock::get_offset()),
-                        new_versions.hardfork,
-                        new_versions.softfork);
+                cb(std::chrono::duration_cast<std::chrono::milliseconds>(
+                           AdjustedClock::get_offset()),
+                   new_versions.hardfork,
+                   new_versions.softfork);
         }
     } catch (const std::exception& e) {
         log::warning(cat, "Failed to parse network state from response: {}", e.what());
@@ -1120,10 +1144,10 @@ void Network::_on_clock_resync_complete(const uint8_t /*total_requests*/) {
                 cat, "[Request {}] Network offset set to: {}ms", refresh_id, median_offset.count());
 
         // Trigger the network info changed callback to update the client
-        if (on_network_info_changed) {
+        if (auto cb = _on_network_info_changed) {
             auto versions = _fork_versions.load();
 
-            on_network_info_changed(median_offset, versions.hardfork, versions.softfork);
+            cb(median_offset, versions.hardfork, versions.softfork);
         }
     }
 
@@ -1524,12 +1548,12 @@ LIBSESSION_C_API uint16_t session_network_softfork(network_object* network) {
 LIBSESSION_C_API void session_network_set_status_changed_callback(
         network_object* network, void (*callback)(CONNECTION_STATUS status, void* ctx), void* ctx) {
     if (!callback)
-        unbox(network)->on_status_changed = nullptr;
+        unbox(network)->set_on_status_changed(nullptr);
     else
-        unbox(network)->on_status_changed = [cb = std::move(callback),
-                                             ctx](ConnectionStatus status) {
-            cb(static_cast<CONNECTION_STATUS>(status), ctx);
-        };
+        unbox(network)->set_on_status_changed(
+                [cb = std::move(callback), ctx](ConnectionStatus status) {
+                    cb(static_cast<CONNECTION_STATUS>(status), ctx);
+                });
 }
 
 LIBSESSION_C_API void session_network_set_network_info_changed_callback(
@@ -1538,15 +1562,15 @@ LIBSESSION_C_API void session_network_set_network_info_changed_callback(
                 int64_t network_time_offset, uint16_t hardfork, uint16_t softfork, void* ctx),
         void* ctx) {
     if (!callback)
-        unbox(network)->on_network_info_changed = nullptr;
+        unbox(network)->set_on_network_info_changed(nullptr);
     else
-        unbox(network)->on_network_info_changed =
+        unbox(network)->set_on_network_info_changed(
                 [cb = std::move(callback), ctx](
                         std::chrono::milliseconds network_time_offset,
                         uint16_t hardfork,
                         uint16_t softfork) {
                     cb(network_time_offset.count(), hardfork, softfork, ctx);
-                };
+                });
 }
 
 LIBSESSION_C_API void session_network_callbacks_respond(
