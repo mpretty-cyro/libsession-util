@@ -4056,23 +4056,30 @@ std::vector<Message> Client::_messages_around(
     if (!convo)
         return {};
     auto visible = include_deleted ? ""sv : "AND m.deleted IS NULL"sv;
+    auto ts = epoch_ms(at.timestamp);
 
-    // Each side fetched in full, so that one which runs short can be made up from the other: the
-    // message at the cursor and newer, oldest first, and everything older, newest first.
-    auto newer = _query_messages(
-            c,
-            id,
-            ReplyDepth::with_target,
-            R"(
-        {} WHERE m.conversation = ?1 {}
-             AND (m.timestamp > ?2 OR (m.timestamp = ?2 AND m.id >= ?3))
-           ORDER BY m.timestamp ASC, m.id ASC LIMIT ?4
-    )"_format(MESSAGE_COLUMNS, visible),
-            *convo,
-            epoch_ms(at.timestamp),
-            at.id,
-            limit);
-    auto older = _messages(id, limit, at, include_deleted);
+    // Keys first, up to `limit` each side, so that one which runs short can be made up from the
+    // other: the message at the cursor and newer, oldest first, and everything older, newest
+    // first.  Read from the history index alone, which is what makes asking for a whole `limit`
+    // on each side cheap; building a message costs far more, and only the window is built.
+    using Key = std::pair<int64_t, int64_t>;
+    auto keys = [&](std::string_view side, std::string_view order) {
+        std::vector<Key> out;
+        for (auto [t, i] : c.prepared_results<int64_t, int64_t>(
+                     R"(
+                SELECT m.timestamp, m.id FROM messages m
+                WHERE m.conversation = ?1 {} AND {}
+                ORDER BY m.timestamp {}, m.id {} LIMIT ?4
+            )"_format(visible, side, order, order),
+                     *convo,
+                     ts,
+                     at.id,
+                     limit))
+            out.emplace_back(t, i);
+        return out;
+    };
+    auto newer = keys("(m.timestamp > ?2 OR (m.timestamp = ?2 AND m.id >= ?3))", "ASC");
+    auto older = keys("(m.timestamp < ?2 OR (m.timestamp = ?2 AND m.id < ?3))", "DESC");
 
     // Of the rest, half older and half newer; an even limit's spare row goes to the newer side,
     // which is the one the cursor's own message is counted on.
@@ -4082,16 +4089,31 @@ std::vector<Message> Client::_messages_around(
         want_older = static_cast<size_t>(limit) - newer.size();
     else if (older.size() < want_older)
         want_newer = static_cast<size_t>(limit) - older.size();
-    // Erased rather than resized: a Message has no default to grow into.
-    newer.erase(newer.begin() + std::min(newer.size(), want_newer), newer.end());
-    older.erase(older.begin() + std::min(older.size(), want_older), older.end());
+    want_older = std::min(want_older, older.size());
+    want_newer = std::min(want_newer, newer.size());
+    if (want_older + want_newer == 0)
+        return {};
 
-    std::ranges::reverse(newer);
-    newer.insert(
-            newer.end(),
-            std::make_move_iterator(older.begin()),
-            std::make_move_iterator(older.end()));
-    return newer;
+    // Then the window itself, in one range between its two ends, which also comes out newest
+    // first.  A range rather than a list of ids: an `IN` list is a different statement for every
+    // length, and each would be kept in the prepared-statement cache.
+    auto oldest = want_older > 0 ? older[want_older - 1] : newer.front();
+    auto newest = want_newer > 0 ? newer[want_newer - 1] : older.front();
+    return _query_messages(
+            c,
+            id,
+            ReplyDepth::with_target,
+            R"(
+        {} WHERE m.conversation = ?1 {}
+             AND (m.timestamp > ?2 OR (m.timestamp = ?2 AND m.id >= ?3))
+             AND (m.timestamp < ?4 OR (m.timestamp = ?4 AND m.id <= ?5))
+           ORDER BY m.timestamp DESC, m.id DESC
+    )"_format(MESSAGE_COLUMNS, visible),
+            *convo,
+            oldest.first,
+            oldest.second,
+            newest.first,
+            newest.second);
 }
 
 std::optional<MessageCursor> Client::_first_unread(const ConversationId& id) {

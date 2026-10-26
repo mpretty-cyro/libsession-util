@@ -526,6 +526,14 @@ TEST_CASE("Client: a window around a message puts it in the middle", "[client][m
         CHECK(conversation->messages_around(20, at(5), await).size() == 10);
     }
 
+    SECTION("deleted messages are skipped, and the window is still full") {
+        REQUIRE(c->delete_message(all[10 - 4].id, await));
+        REQUIRE(c->delete_message(all[10 - 6].id, await));
+        CHECK(bodies(conversation->messages_around(5, at(5), await)) ==
+              std::vector<std::string>{"msg8", "msg7", "msg5", "msg3", "msg2"});
+        CHECK(conversation->messages_around(5, at(5), true, await).size() == 5);
+    }
+
     SECTION("it carries on with before and messages_after") {
         auto window = conversation->messages_around(3, at(5), await);
         REQUIRE(bodies(window) == std::vector<std::string>{"msg6", "msg5", "msg4"});
