@@ -4022,6 +4022,98 @@ std::vector<Message> Client::_messages(
             limit);
 }
 
+std::vector<Message> Client::_messages_after(
+        const ConversationId& id, int limit, MessageCursor after, bool include_deleted) {
+    auto c = core.database().conn();
+    auto convo = find_conversation(c, id);
+    if (!convo)
+        return {};
+    auto visible = include_deleted ? ""sv : "AND m.deleted IS NULL"sv;
+
+    // Ascending, so that `limit` takes the messages nearest the cursor rather than the newest in
+    // the conversation; turned round afterwards to the newest-first order every page comes in.
+    auto page = _query_messages(
+            c,
+            id,
+            ReplyDepth::with_target,
+            R"(
+        {} WHERE m.conversation = ?1 {}
+             AND (m.timestamp > ?2 OR (m.timestamp = ?2 AND m.id > ?3))
+           ORDER BY m.timestamp ASC, m.id ASC LIMIT ?4
+    )"_format(MESSAGE_COLUMNS, visible),
+            *convo,
+            epoch_ms(after.timestamp),
+            after.id,
+            limit);
+    std::ranges::reverse(page);
+    return page;
+}
+
+std::vector<Message> Client::_messages_around(
+        const ConversationId& id, int limit, MessageCursor at, bool include_deleted) {
+    auto c = core.database().conn();
+    auto convo = find_conversation(c, id);
+    if (!convo)
+        return {};
+    auto visible = include_deleted ? ""sv : "AND m.deleted IS NULL"sv;
+
+    // Each side fetched in full, so that one which runs short can be made up from the other: the
+    // message at the cursor and newer, oldest first, and everything older, newest first.
+    auto newer = _query_messages(
+            c,
+            id,
+            ReplyDepth::with_target,
+            R"(
+        {} WHERE m.conversation = ?1 {}
+             AND (m.timestamp > ?2 OR (m.timestamp = ?2 AND m.id >= ?3))
+           ORDER BY m.timestamp ASC, m.id ASC LIMIT ?4
+    )"_format(MESSAGE_COLUMNS, visible),
+            *convo,
+            epoch_ms(at.timestamp),
+            at.id,
+            limit);
+    auto older = _messages(id, limit, at, include_deleted);
+
+    // Of the rest, half older and half newer; an even limit's spare row goes to the newer side,
+    // which is the one the cursor's own message is counted on.
+    size_t want_older = static_cast<size_t>(limit - 1) / 2;
+    size_t want_newer = static_cast<size_t>(limit) - want_older;
+    if (newer.size() < want_newer)
+        want_older = static_cast<size_t>(limit) - newer.size();
+    else if (older.size() < want_older)
+        want_newer = static_cast<size_t>(limit) - older.size();
+    // Erased rather than resized: a Message has no default to grow into.
+    newer.erase(newer.begin() + std::min(newer.size(), want_newer), newer.end());
+    older.erase(older.begin() + std::min(older.size(), want_older), older.end());
+
+    std::ranges::reverse(newer);
+    newer.insert(
+            newer.end(),
+            std::make_move_iterator(older.begin()),
+            std::make_move_iterator(older.end()));
+    return newer;
+}
+
+std::optional<MessageCursor> Client::_first_unread(const ConversationId& id) {
+    auto c = core.database().conn();
+    auto convo = find_conversation(c, id);
+    if (!convo)
+        return std::nullopt;
+    // The same predicate `unread_count` is kept by, so this is always the oldest of what it counts.
+    auto found = c.prepared_maybe_get<int64_t, int64_t>(
+            R"(
+        SELECT timestamp, id FROM messages
+        WHERE conversation = ?1 AND {}
+          AND timestamp > (SELECT last_read FROM conversations WHERE id = ?1)
+        ORDER BY timestamp ASC, id ASC LIMIT 1
+    )"_format(UNREAD),
+            *convo);
+    if (!found)
+        return std::nullopt;
+    auto [timestamp, message] = *found;
+    return MessageCursor{from_epoch_ms(timestamp), message};
+}
+
 void Client::_emit_attachment_availability(std::string_view url) {
     auto c = core.database().conn();
     _emit_messages_showing(c, _messages_showing(c, url));
