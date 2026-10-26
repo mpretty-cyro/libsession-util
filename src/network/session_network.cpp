@@ -330,16 +330,16 @@ Network::~Network() {
         if (_transport)
             _transport->on_status_changed = nullptr;
 
-        // The owner is told the network has gone, and nothing more: tearing the transport down
-        // below closes every connection, and an owner told each one was lost would set about
-        // re-establishing what it had on them, against a Network that is going.  Here because
-        // this runs on the loop, where the hooks are read.
+        // The owner is told the network has gone, and nothing after that: tearing the transport
+        // down below closes every connection, and an owner told each one was lost would set
+        // about re-establishing what it had on them, against a Network that is going.  Here
+        // because this runs on the loop, where the hooks are read, so none can be mid-call.
         _hooks.network_info_changed = nullptr;
         _hooks.server_push = nullptr;
         _hooks.connection_established = nullptr;
         _hooks.connection_lost = nullptr;
-
         _update_status(ConnectionStatus::disconnected);
+        _hooks.status_changed = nullptr;
     });
 
     // Explicitly destroy in dependency order while _loop is still alive. Their destructors post

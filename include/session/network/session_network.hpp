@@ -61,7 +61,7 @@ class Network {
             _clock_resync_download_queue;
 
     /// The owner's, fixed at construction; see NetworkHooks.  Only ever read on the loop.  The
-    /// destructor empties all but `status_changed`, on the loop, before tearing anything down.
+    /// destructor empties them, on the loop, before tearing anything down.
     NetworkHooks _hooks;
 
     /// Our own jobs, rather than the loop's shared queue, so that ~Network can take them away from

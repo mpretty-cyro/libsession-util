@@ -78,8 +78,8 @@ enum class ConnectionStatus {
 /// could be changed without racing that read.  Any of them may be left empty.  Each is called on
 /// the Network's loop, so a hook that blocks holds up the whole network.
 struct NetworkHooks {
-    /// Notified whenever the network connection status changes, including the final
-    /// `disconnected` as the Network is destroyed.
+    /// Notified whenever the network connection status changes, including a final `disconnected`
+    /// as the Network is destroyed, which is the last call any of these hooks receives.
     std::function<void(ConnectionStatus status)> status_changed;
 
     /// Notified when the network's clock offset or fork versions change.

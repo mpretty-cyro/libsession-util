@@ -104,8 +104,11 @@ quic::Loop& Core::loop() {
 Core::~Core() {
     // Before the Network goes, because a poll or a renew that fires while it is being torn down
     // would reach it; stopping `_jq` below cancels them too, but only once the Network is already
-    // gone.  On the loop because the ids are only ever touched there.
+    // gone.  On the loop because the ids are only ever touched there.  `_closing` is set in the
+    // same job: a job a Network hook queued before this one runs first, and whatever it armed is
+    // removed here; one queued after finds `_closing` set and does nothing.
     call_get([this] {
+        _closing = true;
         for (auto* timer : {&_poll_timer, &_sub_timer, &_probe_timer})
             _remove_timer(*timer);
     });
@@ -172,7 +175,8 @@ void Core::set_network(
     // touching subscription state.  Safe to capture `this` bare: the Network is declared after
     // `_loop` so it is destroyed first, ~Network does not return until no callback of its is still
     // in flight, and it drops these three before closing its connections, so its teardown sends
-    // nothing here.
+    // nothing here.  Until it does, `_closing` keeps what they queue from acting once ~Core has
+    // begun.
     network::NetworkHooks hooks;
 
     // The body is copied because it has to be: the span is the transport's buffer and is only
@@ -188,13 +192,14 @@ void Core::set_network(
                                std::string_view endpoint,
                                std::span<const std::byte> body) {
         call([this, endpoint = std::string{endpoint}, body = to_vector(body)] {
-            _handle_server_push(endpoint, body);
+            if (!_closing)
+                _handle_server_push(endpoint, body);
         });
     };
 
     hooks.connection_lost = [this](const network::ed25519_pubkey& node) {
         call([this, node] {
-            if (_sub_node && _sub_node->remote_pubkey == node)
+            if (!_closing && _sub_node && _sub_node->remote_pubkey == node)
                 _drop_subscription("connection lost");
         });
     };
@@ -204,7 +209,7 @@ void Core::set_network(
             // A rebuilt connection carries no subscription: the far end keyed the old one to
             // the connection that just went away.  Losing it should already have dropped us,
             // so this is the case where it somehow did not.
-            if (_subscribed && _sub_node && _sub_node->remote_pubkey == node)
+            if (!_closing && _subscribed && _sub_node && _sub_node->remote_pubkey == node)
                 _drop_subscription("connection was re-established");
         });
     };

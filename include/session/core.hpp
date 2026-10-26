@@ -478,6 +478,11 @@ class Core {
     quic::TimerID _sub_timer;
     quic::TimerID _probe_timer;
 
+    // Set on the loop as Core is destroyed, by the job that removes the timers.  The Network's
+    // hooks fire until ~Network drops them, which comes later, and a job one of them queues here
+    // must not re-arm a timer that has already been removed.
+    bool _closing = false;
+
     // Subscribes to `node` if a subscription is possible and we do not already have one.  Called
     // when a poll of `node` drains, which is what makes it the node we subscribe with: it has an
     // established connection and its cursors are current.
