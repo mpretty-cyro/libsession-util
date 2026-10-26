@@ -4060,8 +4060,10 @@ std::vector<Message> Client::_messages_around(
 
     // Keys first, up to `limit` each side, so that one which runs short can be made up from the
     // other: the message at the cursor and newer, oldest first, and everything older, newest
-    // first.  Read from the history index alone, which is what makes asking for a whole `limit`
-    // on each side cheap; building a message costs far more, and only the window is built.
+    // first.  These walk the history index in order and read two columns, which is what makes
+    // asking for a whole `limit` on each side cheap; building a message costs far more, and only
+    // the window is built.  The index has no `deleted`, so unless deleted messages are included
+    // each row is also looked up in the table to check it.
     using Key = std::pair<int64_t, int64_t>;
     auto keys = [&](std::string_view side, std::string_view order) {
         std::vector<Key> out;
