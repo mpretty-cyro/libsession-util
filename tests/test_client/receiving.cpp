@@ -899,7 +899,7 @@ TEST_CASE(
     // Then another connection holds the write lock, as the app and an extension sharing the
     // database can, for longer than the busy timeout.  The node answers from the start of the
     // batch, as one without our cursor would: the first message's store already fails, so nothing
-    // is taken and the cursor stays where it was.  Nothing went out after the answer either:
+    // is stored and the cursor stays where it was.  Nothing went out after the answer either:
     // neither a continuation nor a subscription, which would stop the polling that is to fetch the
     // rest.
     batch = full;
@@ -953,7 +953,8 @@ TEST_CASE(
             true, false, 200, {}, retrieve_response(request, dm_ns, batch).dump());
     TestHelper::drain(c->core);
 
-    // It is dropped as taken, so the one behind it is stored and the cursor moves past both.
+    // It is dropped rather than retried, so the one behind it is stored and the cursor moves past
+    // both.
     std::vector<std::string> stored;
     for (const auto& m :
          c->conversation(ConversationId::dm(sender.session_id), await)->messages(await))

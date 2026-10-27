@@ -1003,7 +1003,7 @@ void Core::_handle_poll_response(
     // to drop.  For the same reason one already held -- this can be the poll that follows
     // subscribing -- is given up.
     if (refused) {
-        _drop_subscription("a retrieved message was not taken");
+        _drop_subscription("a retrieved message was not stored");
         return;
     }
 
@@ -1313,7 +1313,7 @@ void Core::_handle_server_push(std::string_view endpoint, std::span<const std::b
     // A refused push is retrieved again once polling resumes, from a cursor that no push ever
     // moved.  But polling is stopped for as long as the subscription lasts, so it has to go.
     if (receive_messages({&msg, 1}, static_cast<config::Namespace>(ns_val), true) == 0)
-        _drop_subscription("a pushed message was not taken");
+        _drop_subscription("a pushed message was not stored");
 }
 
 PfsKeyStatus Core::prefetch_pfs_keys(std::span<const std::byte, 33> session_id) {
@@ -1935,7 +1935,7 @@ size_t Core::_handle_direct_messages(std::span<const SwarmMessage> messages) {
     // Ed25519 secret key used for v1 envelope decryption.
     auto ed_sec = seed.ed25519_secret();
 
-    // A message the callback throws on was not taken, and neither is anything after it: see
+    // A message the callback throws on was not stored, and neither is anything after it: see
     // `callbacks::message_received`.  Nothing past it is handed over, since each would have to be
     // refused in turn -- a busy database fails every one of them, a busy timeout apiece.
     bool refused = false;
@@ -1948,7 +1948,7 @@ size_t Core::_handle_direct_messages(std::span<const SwarmMessage> messages) {
         } catch (const std::exception& e) {
             log::warning(
                     cat,
-                    "Message {} was not taken, leaving it to retrieve again: {}",
+                    "Message {} storage failed, leaving it to retrieve again: {}",
                     hash,
                     e.what());
             refused = true;

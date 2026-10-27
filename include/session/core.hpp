@@ -910,7 +910,7 @@ class Core {
     // is_final=true to flush any actions that are deferred until the end of a fetch.
     //
     // Returns how many of `messages`, from the front, were handled.  Anything short of all of them
-    // means a handler could not take one (see `callbacks::message_received`): that message and
+    // means a handler could not store one (see `callbacks::message_received`): that message and
     // everything after it are unhandled and have to be delivered again, so a caller keeping its
     // own retrieve position must not move it past the last handled message.
     size_t receive_messages(

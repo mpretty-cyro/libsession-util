@@ -403,7 +403,7 @@ core::callbacks Client::_core_callbacks() {
     // than move its cursor past it, and a message that throws every time holds back everything
     // behind it until it expires off the swarm.  So only a database that cannot be written right
     // now is let through (see `store_can_retry`); any other failure is the message's own, and it is
-    // dropped as taken.
+    // dropped rather than retried.
     cb.message_received = [this](core::ReceivedMessage&& msg) {
         auto hash = msg.hash;
         try {

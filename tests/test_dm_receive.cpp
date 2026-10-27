@@ -427,7 +427,7 @@ TEST_CASE(
     OwnedMessage om3{std::span{e3}, "h3"};
     std::array<SwarmMessage, 3> msgs{om1.msg, om2.msg, om3.msg};
 
-    // The exception does not propagate.  It marks the message as not taken, so it and everything
+    // The exception does not propagate.  It marks the message as not stored, so it and everything
     // after it are left to be delivered again: only the first counts as handled, and the third is
     // never offered.
     size_t handled = 0;
