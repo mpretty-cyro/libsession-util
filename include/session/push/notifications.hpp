@@ -204,6 +204,15 @@ class Notifications {
             std::chrono::milliseconds deadline,
             result_function<HandledPush> cb);
 
+    /// Claims the posting of the notification for message `message_id`: true for the first caller
+    /// across every process sharing the database, false for every caller after.  Call it just
+    /// before posting, and post only on true -- the application and its notification extension can
+    /// both receive the same message (a push racing a poll), and only one of them should show it.
+    ///
+    /// A claim lasts as long as its message.  Throws if no such message exists.  Blocks until done;
+    /// callable from any thread.
+    bool claim(int64_t message_id);
+
     /// Namespaces subscribed without message data whose pushes `handle` fetches for.
     static bool fetch_on_push(config::Namespace ns);
 

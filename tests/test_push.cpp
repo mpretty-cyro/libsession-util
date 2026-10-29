@@ -783,3 +783,23 @@ TEST_CASE("Push handle: pushes that are not handled", "[push_notifications]") {
         CHECK(x.only().outcome == push::Handled::malformed);
     }
 }
+
+// ── Claiming a notification ─────────────────────────────────────────────────────────────────────
+
+TEST_CASE(
+        "Push claim: only the first process to claim a message posts it", "[push_notifications]") {
+    TempClient app;
+    SenderKeys sender;
+    deliver(*app, sender, "hello", clock_now_ms(), "h-1");
+    auto id = app->message_by_hash("h-1", await)->id;
+
+    // The extension, on the same database while the application is alive.
+    Client extension{app.path, core::one_shot{}};
+    Notifications from_extension{extension}, from_app{*app};
+
+    CHECK(from_extension.claim(id));
+    CHECK_FALSE(from_app.claim(id));
+    CHECK_FALSE(from_extension.claim(id));
+
+    CHECK_THROWS(from_app.claim(id + 1000));
+}

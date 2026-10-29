@@ -182,6 +182,16 @@ namespace {
 
 }  // namespace
 
+bool Notifications::claim(int64_t message_id) {
+    auto& core = _client.core;
+    return core.call_get([&core, message_id] {
+        return core.database().conn().prepared_exec(
+                       "INSERT INTO notified (message, at) VALUES (?, ?) ON CONFLICT DO NOTHING",
+                       message_id,
+                       epoch_ms(clock_now_ms())) > 0;
+    });
+}
+
 bool Notifications::fetch_on_push(config::Namespace ns) {
     switch (ns) {
         // A change to the device group may be a key rotation, without whose keys later messages
