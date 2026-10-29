@@ -95,6 +95,54 @@ struct HandledPush {
     std::optional<client::Message> message;
 };
 
+/// The kind of a message's first attachment, for the platform's attachment placeholder ("📷
+/// Attachment").
+enum class AttachmentKind {
+    image,
+    animated,
+    video,
+    audio,
+    voice,
+    file,
+};
+
+/// What a notification says, as structured content: each platform builds the text from its own
+/// localised strings rather than libsession writing any.
+struct NotificationContent {
+    enum class Kind {
+        /// A message, from `sender`, saying `body` and/or carrying attachments.
+        message,
+        /// The first message of a message request: shown without its sender or contents, titled
+        /// "Session", as "You have a new message request".  Requests come from strangers, so
+        /// neither their name nor their words reach the lock screen.
+        message_request,
+        /// A message that could not be shown: "You've got a new message.", titled "Session".
+        generic,
+    };
+    Kind kind;
+
+    /// The notification's identifier, which a later removal names: the message's swarm hash, or
+    /// GENERIC_ID, which every generic notification shares so that a run of them is one.
+    std::string id;
+
+    /// The thread it is grouped under: the conversation's id, REQUESTS_THREAD for every request,
+    /// or GENERIC_ID.
+    std::string thread;
+
+    /// Whom it is from; unset when the privacy setting hides names.
+    std::optional<std::string> sender;
+
+    /// What the message says, with mentions resolved (`@Name`, `@You`); unset when the privacy
+    /// setting hides content or the message has no text.
+    std::optional<std::string> body;
+
+    /// The first attachment's kind and how many there are, when the privacy setting shows content.
+    std::optional<AttachmentKind> attachment;
+    size_t attachments = 0;
+
+    sys_ms timestamp{};
+};
+
 /// The `Error::code` values push reports, alongside Client's (`client::err`).
 namespace err {
     /// The push server refused a subscription or unsubscription.  The message carries its reason.
@@ -212,6 +260,40 @@ class Notifications {
     /// A claim lasts as long as its message.  Throws if no such message exists.  Blocks until done;
     /// callable from any thread.
     bool claim(int64_t message_id);
+
+    /// Shared by every generic notification as both identifier and thread.
+    static constexpr std::string_view GENERIC_ID = "generic";
+
+    /// The thread every message request is grouped under.
+    static constexpr std::string_view REQUESTS_THREAD = "message-requests";
+
+    /// Decides what, if anything, to show for a handled push, and claims it: a result means this
+    /// process has the claim and should post it; nullopt means show nothing.
+    ///
+    /// Shown: an incoming message, unread, not deleted, in a conversation that is neither muted
+    /// nor silenced, from a sender not blocked -- and for a message request only its first, until
+    /// the request is removed.  `open` is the conversation on screen, which gets no notification.
+    /// Mentions-only is a group setting and reads as "all" on a one-to-one conversation.
+    ///
+    /// Generic: a push whose payload would not decrypt or decode, and a one-to-one message that
+    /// had to be fetched and could not be.  Everything else is silent: configs, control messages
+    /// (none of which Client stores), our own messages, and pushes for swarms we do not hold.
+    ///
+    /// The content follows the privacy setting (`config::Local::get_notification_content`).
+    ///
+    /// Blocks until done; callable from any thread.
+    ///
+    /// TODO: a one-to-one message that would not decrypt should get the generic notification, but
+    /// Core reports no per-message decrypt failure to tell it from a message Client chose not to
+    /// store.  Groups, group titles and mentions wait on Client holding groups.
+    std::optional<NotificationContent> decide(
+            const HandledPush& handled, std::optional<client::ConversationId> open = std::nullopt);
+
+    /// The identifiers of shown notifications whose messages have since been read or deleted, to
+    /// take down; each is reported once.  Call after `handle`, and whenever read state changes --
+    /// which, for what was read on another device, `handle` fetches.  Blocks; callable from any
+    /// thread.
+    std::vector<std::string> stale();
 
     /// Namespaces subscribed without message data whose pushes `handle` fetches for.
     static bool fetch_on_push(config::Namespace ns);

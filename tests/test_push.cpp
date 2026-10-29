@@ -1,6 +1,7 @@
 #include <oxenc/bt_producer.h>
 #include <sodium/crypto_sign.h>
 
+#include <session/config/local.hpp>
 #include <session/push/notifications.hpp>
 #include <session/push/payload.hpp>
 #include <session/session_encrypt.hpp>
@@ -802,4 +803,205 @@ TEST_CASE(
     CHECK_FALSE(from_extension.claim(id));
 
     CHECK_THROWS(from_app.claim(id + 1000));
+}
+
+// ── Deciding what to show ───────────────────────────────────────────────────────────────────────
+
+namespace {
+
+using push::Handled;
+using push::NotificationContent;
+
+/// A Client holding messages, and the decisions made about them.
+struct Decider {
+    TempClient c;
+    Notifications notifications{*c};
+    int64_t ts = 1'700'000'000'000;
+
+    /// Delivers a message from `from` and hands back the push that would have brought it.
+    push::HandledPush arrived(
+            const SenderKeys& from,
+            std::string body,
+            std::string hash,
+            std::string_view name = "") {
+        deliver(*c, from, body, from_epoch_ms(ts++), hash, name);
+        return {Handled::received, std::nullopt, c->message_by_hash(hash, await)};
+    }
+
+    std::optional<NotificationContent> decide(
+            const push::HandledPush& h, std::optional<client::ConversationId> open = std::nullopt) {
+        return notifications.decide(h, open);
+    }
+
+    void privacy(config::notify_content level) {
+        c->core.call_get([&] { c->core.configs.local().set_notification_content(level); });
+    }
+};
+
+}  // namespace
+
+TEST_CASE("Push decide: a message from someone we talk to", "[push_notifications]") {
+    Decider d;
+    SenderKeys alice;
+    approve(*d.c, alice.session_id);
+
+    auto h = d.arrived(alice, "hi there", "h-1", "Alice");
+    auto n = d.decide(h);
+    REQUIRE(n);
+    CHECK(n->kind == NotificationContent::Kind::message);
+    CHECK(n->id == "h-1");
+    CHECK(n->thread == client::ConversationId::dm(alice.session_id).to_string());
+    CHECK(n->sender == "Alice");
+    CHECK(n->body == "hi there");
+
+    // Claimed: deciding again, here or in another process, shows nothing.
+    CHECK_FALSE(d.decide(h));
+}
+
+TEST_CASE("Push decide: the privacy setting", "[push_notifications]") {
+    Decider d;
+    SenderKeys alice;
+    approve(*d.c, alice.session_id);
+
+    SECTION("name only") {
+        d.privacy(config::notify_content::name_no_preview);
+        auto n = d.decide(d.arrived(alice, "secret", "h-1", "Alice"));
+        REQUIRE(n);
+        CHECK(n->sender == "Alice");
+        CHECK_FALSE(n->body);
+    }
+    SECTION("neither") {
+        d.privacy(config::notify_content::no_name_no_preview);
+        auto n = d.decide(d.arrived(alice, "secret", "h-1", "Alice"));
+        REQUIRE(n);
+        CHECK(n->kind == NotificationContent::Kind::message);
+        CHECK_FALSE(n->sender);
+        CHECK_FALSE(n->body);
+    }
+}
+
+TEST_CASE("Push decide: mentions are resolved", "[push_notifications]") {
+    Decider d;
+    SenderKeys alice, bob;
+    approve(*d.c, alice.session_id);
+    d.arrived(bob, "earlier", "h-0", "Bob");
+    auto bob_hex = oxenc::to_hex(bob.session_id.begin(), bob.session_id.end());
+    auto me = d.c->core.globals.session_id_hex();
+
+    auto n = d.decide(d.arrived(alice, "@{} and @{}: look"_format(bob_hex, me), "h-1", "Alice"));
+    REQUIRE(n);
+    CHECK(n->body == "@Bob and @You: look");
+}
+
+TEST_CASE("Push decide: what shows nothing", "[push_notifications]") {
+    Decider d;
+    SenderKeys alice;
+    approve(*d.c, alice.session_id);
+    auto convo = client::ConversationId::dm(alice.session_id);
+
+    SECTION("muted") {
+        d.arrived(alice, "first", "h-0");
+        d.c->conversation(convo, await)
+                ->set_mute_until(std::chrono::floor<std::chrono::seconds>(clock_now() + 1h), await);
+        CHECK_FALSE(d.decide(d.arrived(alice, "hi", "h-1")));
+    }
+    SECTION("notifications off") {
+        d.arrived(alice, "first", "h-0");
+        d.c->conversation(convo, await)->set_notifications(config::notify_mode::disabled, await);
+        CHECK_FALSE(d.decide(d.arrived(alice, "hi", "h-1")));
+    }
+    SECTION("already read") {
+        auto h = d.arrived(alice, "hi", "h-1");
+        d.c->conversation(convo, await)->mark_read(await);
+        CHECK_FALSE(d.decide(h));
+    }
+    SECTION("the conversation on screen") {
+        CHECK_FALSE(d.decide(d.arrived(alice, "hi", "h-1"), convo));
+    }
+    SECTION("blocked, after the fact") {
+        auto h = d.arrived(alice, "hi", "h-1");
+        d.c->set_blocked(convo, true, await);
+        CHECK_FALSE(d.decide(h));
+    }
+    SECTION("our own message") {
+        deliver(*d.c,
+                self_keys(*d.c),
+                "mine",
+                from_epoch_ms(d.ts++),
+                "h-own",
+                "",
+                alice.session_id);
+        CHECK_FALSE(
+                d.decide({Handled::received, std::nullopt, d.c->message_by_hash("h-own", await)}));
+    }
+    SECTION("nothing stored") {
+        CHECK_FALSE(d.decide({Handled::received, std::nullopt, std::nullopt}));
+        CHECK_FALSE(d.decide({Handled::nothing_to_do, std::nullopt, std::nullopt}));
+        CHECK_FALSE(d.decide({Handled::not_ours, std::nullopt, std::nullopt}));
+    }
+}
+
+TEST_CASE("Push decide: a message request shows its first message only", "[push_notifications]") {
+    Decider d;
+    SenderKeys stranger;
+
+    auto n = d.decide(d.arrived(stranger, "buy now", "h-1", "Spammer"));
+    REQUIRE(n);
+    CHECK(n->kind == NotificationContent::Kind::message_request);
+    CHECK(n->thread == Notifications::REQUESTS_THREAD);
+    CHECK_FALSE(n->sender);
+    CHECK_FALSE(n->body);
+
+    CHECK_FALSE(d.decide(d.arrived(stranger, "buy now!!", "h-2")));
+
+    // Removing the request starts over: a new message from them is a first again.
+    d.c->conversation(client::ConversationId::dm(stranger.session_id), await)
+            ->delete_conversation(await);
+    CHECK(d.decide(d.arrived(stranger, "hello again", "h-3")));
+}
+
+TEST_CASE("Push decide: generic and silent failures", "[push_notifications]") {
+    Decider d;
+    push::Payload dm_payload;
+    dm_payload.ns = config::Namespace::Default;
+    push::Payload config_payload;
+    config_payload.ns = config::Namespace::UserGroups;
+
+    for (auto outcome : {Handled::undecryptable, Handled::malformed}) {
+        auto n = d.decide({outcome, std::nullopt, std::nullopt});
+        REQUIRE(n);
+        CHECK(n->kind == NotificationContent::Kind::generic);
+        CHECK(n->id == Notifications::GENERIC_ID);
+    }
+    for (auto outcome : {Handled::not_found, Handled::fetch_failed}) {
+        auto n = d.decide({outcome, dm_payload, std::nullopt});
+        REQUIRE(n);
+        CHECK(n->kind == NotificationContent::Kind::generic);
+        CHECK_FALSE(d.decide({outcome, config_payload, std::nullopt}));
+    }
+}
+
+TEST_CASE(
+        "Push stale: shown notifications whose messages were read or deleted",
+        "[push_notifications]") {
+    Decider d;
+    SenderKeys alice, bob;
+    approve(*d.c, alice.session_id);
+    approve(*d.c, bob.session_id);
+
+    auto a = d.arrived(alice, "one", "h-a");
+    auto b = d.arrived(bob, "two", "h-b");
+    REQUIRE(d.decide(a));
+    REQUIRE(d.decide(b));
+    CHECK(d.notifications.stale().empty());
+
+    d.c->conversation(client::ConversationId::dm(alice.session_id), await)->mark_read(await);
+    d.c->delete_message(b.message->id, await);
+
+    auto stale = d.notifications.stale();
+    std::ranges::sort(stale);
+    CHECK(stale == std::vector<std::string>{"h-a", "h-b"});
+    // Once each, and still claimed: never shown again.
+    CHECK(d.notifications.stale().empty());
+    CHECK_FALSE(d.decide(a));
 }
