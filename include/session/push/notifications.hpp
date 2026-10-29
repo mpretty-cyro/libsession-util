@@ -6,6 +6,7 @@
 #include <session/client/error_codes.hpp>
 #include <session/config/namespaces.hpp>
 #include <session/network/key_types.hpp>
+#include <session/push/payload.hpp>
 #include <session/util.hpp>
 #include <string>
 
@@ -49,6 +50,48 @@ struct FetchedMessage {
     /// one the Client keeps and is there -- including when a poll got it first, which a push racing
     /// a poll makes ordinary, whatever `result` says.  Nullopt for anything else: a config message,
     /// say, or one dropped as coming from someone blocked.
+    std::optional<client::Message> message;
+};
+
+/// What became of one push handed to `Notifications::handle`.
+enum class Handled {
+    /// The push carried the message, and it has been received.
+    received,
+
+    /// The message was fetched from the swarm and received: it was too large for the push, or the
+    /// push was for a namespace subscribed without message data whose contents matter now.
+    fetched,
+
+    /// A push without the message, for a namespace that needs nothing done now (a config the
+    /// application picks up on its next poll).
+    nothing_to_do,
+
+    /// The message had to be fetched, and the members asked did not have it yet.
+    not_found,
+
+    /// The message had to be fetched, and no member answered in time, or there is no network.
+    fetch_failed,
+
+    /// For a swarm this device does not hold: not our account, and no group we know.
+    not_ours,
+
+    /// The payload did not decrypt with our key.  The subscription has been marked due, so the
+    /// next `subscribe` renews it.
+    undecryptable,
+
+    /// The payload decrypted to something that is not a push payload.
+    malformed,
+};
+
+struct HandledPush {
+    Handled outcome;
+
+    /// What the push said, for anything that decoded (every outcome but undecryptable and
+    /// malformed).
+    std::optional<Payload> payload;
+
+    /// What is stored for the message once handling is done, as for `FetchedMessage::message`:
+    /// set for a message the Client keeps, however it arrived.
     std::optional<client::Message> message;
 };
 
@@ -144,6 +187,25 @@ class Notifications {
     /// Removes this device's subscription, if it has one.  `cb` gets true once the push server has
     /// accepted the removal (or there was nothing to remove), or an error as for `subscribe`.
     void unsubscribe(result_function<bool> cb);
+
+    /// Handles one push: decodes `enc_payload` (the base64 text of the push's `enc_payload` field)
+    /// with this device's key, then receives the message it carried, or fetches the message it
+    /// could not carry, or fetches what a push without data stands for where that matters now --
+    /// the device group, whose change may be a key rotation or a link request, and the read state,
+    /// so that notifications for what was read elsewhere can be removed.
+    ///
+    /// Fetching is bounded by `deadline`; see `fetch_message`.  A message the push carried is
+    /// received without touching the retrieve cursor, since a push is not a position in what any
+    /// swarm member has returned.
+    ///
+    /// `cb` is called exactly once, through the Client's dispatcher.
+    void handle(
+            std::string_view enc_payload,
+            std::chrono::milliseconds deadline,
+            result_function<HandledPush> cb);
+
+    /// Namespaces subscribed without message data whose pushes `handle` fetches for.
+    static bool fetch_on_push(config::Namespace ns);
 
     /// Fetches a message that a push announced but could not carry: the push server leaves out a
     /// body too large for a notification, and sends its namespace and swarm hash instead.  What is

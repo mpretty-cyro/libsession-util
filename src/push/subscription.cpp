@@ -11,6 +11,7 @@
 
 #include "../core/swarm_request.hpp"
 #include "client_access.hpp"
+#include "internal.hpp"
 
 namespace session::push {
 
@@ -201,6 +202,14 @@ namespace {
     }
 
 }  // namespace
+
+void detail::mark_subscription_due(core::Core& core) {
+    auto recorded = load_recorded(core);
+    if (!recorded)
+        return;
+    recorded->at = sys_ms{};
+    store_recorded(core, *recorded);
+}
 
 std::string_view to_string(Service s) {
     switch (s) {

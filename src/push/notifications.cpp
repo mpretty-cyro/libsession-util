@@ -4,13 +4,16 @@
 #include <oxen/log.hpp>
 #include <session/network/session_network.hpp>
 
+#include "client_access.hpp"
 #include "core_access.hpp"
+#include "internal.hpp"
 
 namespace session::push {
 
 namespace log = oxen::log;
 static auto cat = log::Cat("push");
 
+using detail::ClientAccess;
 using detail::CoreAccess;
 
 namespace {
@@ -178,6 +181,92 @@ namespace {
     }
 
 }  // namespace
+
+bool Notifications::fetch_on_push(config::Namespace ns) {
+    switch (ns) {
+        // A change to the device group may be a key rotation, without whose keys later messages
+        // will not decrypt, or a link request the user is waiting on.
+        case config::Namespace::Devices: return true;
+        // What was read on another device, so that its notifications here can be removed.
+        case config::Namespace::ConvoInfoVolatile: return true;
+        default: return false;
+    }
+}
+
+void Notifications::handle(
+        std::string_view enc_payload,
+        std::chrono::milliseconds deadline,
+        result_function<HandledPush> cb) {
+    auto* core = &_client.core;
+    auto* client = &_client;
+
+    // Reports an outcome that has no stored message to look up.
+    auto report = [core, client](
+                          result_function<HandledPush> cb,
+                          Handled outcome,
+                          std::optional<Payload> payload) {
+        core->call([client, cb = std::move(cb), outcome, payload = std::move(payload)]() mutable {
+            ClientAccess::report(
+                    *client,
+                    cb,
+                    Expected<HandledPush>{HandledPush{outcome, std::move(payload), std::nullopt}});
+        });
+    };
+
+    Payload p;
+    try {
+        p = decode(enc_payload, encryption_key());
+    } catch (const undecryptable&) {
+        log::warning(cat, "A push did not decrypt with our key; renewing the subscription");
+        core->call([core] { detail::mark_subscription_due(*core); });
+        return report(std::move(cb), Handled::undecryptable, std::nullopt);
+    } catch (const malformed& e) {
+        log::warning(cat, "Malformed push: {}", e.what());
+        return report(std::move(cb), Handled::malformed, std::nullopt);
+    }
+
+    // TODO: a group's swarm, once Core holds groups; until then every push is for the account.
+    if (!core->globals.have_account() || p.swarm != core->globals.session_id_hex())
+        return report(std::move(cb), Handled::not_ours, std::move(p));
+
+    if (p.data) {
+        core->call([core, client, p = std::move(p), cb = std::move(cb)]() mutable {
+            core::SwarmMessage m{*p.data, p.hash, p.timestamp, p.expiry};
+            {
+                auto configs_held = core->configs.batch();
+                core->receive_messages({&m, 1}, p.ns, true);
+            }
+            auto hash = p.hash;
+            client->message_by_hash(
+                    std::move(hash), [p = std::move(p), cb = std::move(cb)](auto stored) mutable {
+                        if (!stored)
+                            return cb(Expected<HandledPush>{unexpected{stored.error()}});
+                        cb(Expected<HandledPush>{
+                                HandledPush{Handled::received, std::move(p), std::move(*stored)}});
+                    });
+        });
+        return;
+    }
+
+    if (!p.too_large && !fetch_on_push(p.ns))
+        return report(std::move(cb), Handled::nothing_to_do, std::move(p));
+
+    auto ns = p.ns;
+    auto hash = p.hash;
+    fetch_message(
+            ns,
+            std::move(hash),
+            deadline,
+            [p = std::move(p), cb = std::move(cb)](Expected<FetchedMessage> fetched) mutable {
+                if (!fetched)
+                    return cb(Expected<HandledPush>{unexpected{fetched.error()}});
+                auto outcome = fetched->result == FetchResult::found     ? Handled::fetched
+                             : fetched->result == FetchResult::not_found ? Handled::not_found
+                                                                         : Handled::fetch_failed;
+                cb(Expected<HandledPush>{
+                        HandledPush{outcome, std::move(p), std::move(fetched->message)}});
+            });
+}
 
 void Notifications::fetch_message(
         config::Namespace ns,

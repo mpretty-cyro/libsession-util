@@ -639,3 +639,147 @@ TEST_CASE("Push subscribe: without a network", "[push_notifications]") {
     REQUIRE_FALSE(result->has_value());
     CHECK(result->error().code == client::err::network_unavailable);
 }
+
+// ── Handling a push ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+/// A one-shot Client as a notification extension opens it, with a swarm of one member.
+struct Extension : Setup {
+    std::vector<Expected<push::HandledPush>> handled;
+
+    Extension() : Setup{1} {}
+
+    std::string sid() { return c->core.globals.session_id_hex(); }
+
+    /// A push for our account, in namespace `ns`, as the push server would send it.
+    std::string push_for(
+            int16_t ns,
+            std::optional<std::vector<std::byte>> body,
+            nlohmann::json extra = nlohmann::json::object()) {
+        extra["@"] = sid();
+        extra["n"] = ns;
+        if (body)
+            extra["l"] = body->size();
+        auto meta = metadata_json(extra);
+        auto key = notifications.encryption_key();
+        return oxenc::to_base64(
+                seal(key, body ? list_of(meta, to_string_view(*body)) : list_of(meta)));
+    }
+
+    void handle(std::string enc_payload) {
+        notifications.handle(enc_payload, 10s, [this](auto r) { handled.push_back(std::move(r)); });
+        TestHelper::drain(c->core);
+    }
+
+    push::HandledPush only() {
+        REQUIRE(handled.size() == 1);
+        REQUIRE(handled[0].has_value());
+        return *handled[0];
+    }
+};
+
+}  // namespace
+
+TEST_CASE("Push handle: a push carrying its message", "[push_notifications]") {
+    Extension x;
+    SenderKeys sender;
+    auto data = encode_incoming_dm(*x.c, sender, "short enough", clock_now_ms());
+    x.handle(x.push_for(0, data));
+
+    auto h = x.only();
+    CHECK(h.outcome == push::Handled::received);
+    REQUIRE(h.payload);
+    CHECK(h.payload->hash == "h-pushed");
+    REQUIRE(h.message);
+    CHECK(h.message->body == "short enough");
+    CHECK(h.message->hash == "h-pushed");
+
+    // Nothing fetched, and no member's cursor moved: a push is not a position in a retrieve.
+    CHECK(take_retrieves(*x.net).empty());
+    CHECK_FALSE(
+            TestHelper::namespace_last_hash(x.c->core, 0, x.net->current_swarm[0].remote_pubkey));
+}
+
+TEST_CASE("Push handle: a message too large for the push is fetched", "[push_notifications]") {
+    Extension x;
+    SenderKeys sender;
+    x.handle(x.push_for(0, std::nullopt, {{"l", 4000}, {"B", true}}));
+    CHECK(x.handled.empty());
+
+    auto sent = take_retrieves(*x.net);
+    REQUIRE(sent.size() == 1);
+    x.reply(sent[0],
+            answer_with(
+                    {{encode_incoming_dm(*x.c, sender, "too long", clock_now_ms()), "h-pushed"}}));
+
+    auto h = x.only();
+    CHECK(h.outcome == push::Handled::fetched);
+    REQUIRE(h.message);
+    CHECK(h.message->body == "too long");
+}
+
+TEST_CASE("Push handle: a push without data", "[push_notifications]") {
+    Extension x;
+
+    SECTION("for a config that can wait for the next poll") {
+        x.handle(x.push_for(static_cast<int16_t>(config::Namespace::UserGroups), std::nullopt));
+        CHECK(x.only().outcome == push::Handled::nothing_to_do);
+        CHECK(take_retrieves(*x.net).empty());
+    }
+
+    SECTION("for the device group, which is fetched now") {
+        x.handle(x.push_for(static_cast<int16_t>(config::Namespace::Devices), std::nullopt));
+        auto sent = take_retrieves(*x.net);
+        REQUIRE(sent.size() == 1);
+        CHECK(retrieve_params(sent[0])["namespace"] == 21);
+        // Empty both times: the first round and its retry.
+        x.reply(sent[0], answer({}));
+        x.wait(PAST_THE_RETRY);
+        auto again = take_retrieves(*x.net);
+        REQUIRE(again.size() == 1);
+        x.reply(again[0], answer({}));
+        CHECK(x.only().outcome == push::Handled::not_found);
+    }
+
+    SECTION("for the read state, which is fetched now") {
+        x.handle(x.push_for(
+                static_cast<int16_t>(config::Namespace::ConvoInfoVolatile), std::nullopt));
+        CHECK(take_retrieves(*x.net).size() == 1);
+    }
+}
+
+TEST_CASE("Push handle: pushes that are not handled", "[push_notifications]") {
+    Extension x;
+
+    SECTION("another swarm") {
+        x.handle(oxenc::to_base64(
+                seal(x.notifications.encryption_key(), list_of(metadata_json(), "hello"))));
+        CHECK(x.only().outcome == push::Handled::not_ours);
+    }
+
+    SECTION("another key, which makes the subscription due") {
+        // The application's side: a subscription recorded as current.
+        Subscriber app;
+        app.subscribed("token-1");
+        Notifications on_app_db{*app.c};
+
+        std::optional<Expected<push::HandledPush>> got;
+        on_app_db.handle(
+                oxenc::to_base64(seal(push_key(), list_of(metadata_json()))), 10s, [&](auto r) {
+                    got = std::move(r);
+                });
+        TestHelper::drain(app.c->core);
+        REQUIRE(got);
+        REQUIRE(got->has_value());
+        CHECK((*got)->outcome == push::Handled::undecryptable);
+
+        app.subscribe("token-1");
+        CHECK(take_sent_to(*app.net, "subscribe").size() == 1);
+    }
+
+    SECTION("not a payload") {
+        x.handle(oxenc::to_base64(seal(x.notifications.encryption_key(), "nonsense")));
+        CHECK(x.only().outcome == push::Handled::malformed);
+    }
+}
