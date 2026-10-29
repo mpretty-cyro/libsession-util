@@ -22,13 +22,6 @@ else()
     set(LANG_FILES ${LANG_FILES_ORDERED})
 endif()
 
-# file(WRITE) on every configure would leave the sources newer than their objects, and every build
-# would recompile them; configure_file leaves an output whose content is unchanged untouched.
-function(write_if_different path content)
-    file(WRITE "${path}.tmp" "${content}")
-    configure_file("${path}.tmp" "${path}" COPYONLY)
-endfunction()
-
 set(MNEMONIC_SOURCES "")
 set(LANG_EXTERNS "")
 set(LANG_LIST "")
@@ -75,22 +68,9 @@ foreach(f IN LISTS LANG_FILES)
     endforeach()
 
     set(GENERATED_CPP "${CMAKE_CURRENT_BINARY_DIR}/lang_${lang_var}.cpp")
-    write_if_different("${GENERATED_CPP}"
-"#include <session/mnemonics.hpp>
-
-namespace session::mnemonics {
-
-extern const Mnemonics ${lang_var};
-const Mnemonics ${lang_var} = {
-    \"${ENGLISH_NAME}\",
-    \"${NATIVE_NAME}\",
-    ${PREFIX_LEN},
-    {{
-${WORDS_CODE}    }}
-};
-
-} // namespace session::mnemonics
-")
+    # configure_file only rewrites an output whose content changed, so a reconfigure doesn't touch
+    # the generated sources (and force them all to recompile) unless a language file changed.
+    configure_file(lang.cpp.in "${GENERATED_CPP}" @ONLY)
     list(APPEND MNEMONIC_SOURCES "${GENERATED_CPP}")
     string(APPEND LANG_EXTERNS "extern const Mnemonics ${lang_var};\n")
     string(APPEND LANG_LIST "    &${lang_var},\n")
@@ -98,22 +78,7 @@ ${WORDS_CODE}    }}
 endforeach()
 
 set(MASTER_CPP "${CMAKE_CURRENT_BINARY_DIR}/mnemonics_registry.cpp")
-write_if_different("${MASTER_CPP}"
-"#include <session/mnemonics.hpp>
-#include <array>
-
-namespace session::mnemonics {
-
-${LANG_EXTERNS}
-static constexpr std::array<const Mnemonics*, ${LANG_COUNT}> all_languages = {{
-${LANG_LIST}}};
-
-std::span<const Mnemonics* const> get_languages() {
-    return all_languages;
-}
-
-} // namespace session::mnemonics
-")
+configure_file(mnemonics_registry.cpp.in "${MASTER_CPP}" @ONLY)
 
 list(APPEND MNEMONIC_SOURCES "${MASTER_CPP}")
 
