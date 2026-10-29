@@ -140,7 +140,8 @@ struct NotificationContent {
     /// Whom it is from; unset when the privacy setting hides names.
     std::optional<std::string> sender;
 
-    /// What the message says, with mentions resolved (`@Name`, `@You`); unset when the privacy
+    /// What the message says, with mentions resolved (`@Name`, and `@` and the `you` given to
+    /// `decide` for the user); unset when the privacy
     /// setting hides content or the message has no text.
     std::optional<std::string> body;
 
@@ -297,8 +298,14 @@ class Notifications {
     /// Blocks until done; callable from any thread.
     ///
     /// TODO: groups, group titles and mentions, once Client holds groups.
+    ///
+    /// `you` is the application's own word for the user, in the user's language, which a mention of
+    /// the user becomes (`@You` in English): the one piece of text libsession writes into the
+    /// content, so the caller supplies it rather than libsession assuming English.
     std::optional<NotificationContent> decide(
-            const HandledPush& handled, std::optional<client::ConversationId> open = std::nullopt);
+            const HandledPush& handled,
+            std::string_view you,
+            std::optional<client::ConversationId> open = std::nullopt);
 
     /// The identifiers of shown notifications whose messages have since been read or deleted, to
     /// take down; each is reported once.  Call after `handle`, and whenever read state changes --

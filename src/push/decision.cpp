@@ -66,9 +66,9 @@ namespace {
                               : std::string{hex};
     }
 
-    // `@` followed by a session id becomes `@Name`, or `@You` for us; one with no known name
-    // keeps a shortened id, as a conversation shows an unnamed sender.
-    std::string resolve_mentions(core::Core& core, std::string_view body) {
+    // `@` followed by a session id becomes `@Name`, or `@` and the caller's `you` for us; one with
+    // no known name keeps a shortened id, as a conversation shows an unnamed sender.
+    std::string resolve_mentions(core::Core& core, std::string_view body, std::string_view you) {
         std::string me = core.globals.have_account() ? core.globals.session_id_hex() : "";
         std::string out;
         size_t i = 0;
@@ -85,9 +85,10 @@ namespace {
                 i = at + 1;
                 continue;
             }
-            if (id == me)
-                out += "@You";
-            else {
+            if (id == me) {
+                out += '@';
+                out += you;
+            } else {
                 auto name = core.database().conn().prepared_maybe_get<std::string>(
                         R"(
 SELECT COALESCE(ct.nickname, a.name) FROM accounts a LEFT JOIN contacts ct ON ct.account = a.id
@@ -105,7 +106,9 @@ SELECT COALESCE(ct.nickname, a.name) FROM accounts a LEFT JOIN contacts ct ON ct
 }  // namespace
 
 std::optional<NotificationContent> Notifications::decide(
-        const HandledPush& handled, std::optional<client::ConversationId> open) {
+        const HandledPush& handled,
+        std::string_view you,
+        std::optional<client::ConversationId> open) {
     switch (handled.outcome) {
         case Handled::undecryptable:
         case Handled::malformed: return generic();
@@ -206,7 +209,7 @@ SELECT EXISTS (SELECT 1 FROM notified n JOIN messages o ON o.id = n.message
         return n;
 
     if (!m.body.empty())
-        n.body = core.call_get([&] { return resolve_mentions(core, m.body); });
+        n.body = core.call_get([&] { return resolve_mentions(core, m.body, you); });
     if (!m.attachments.empty()) {
         n.attachment = kind_of(m.attachments.front());
         n.attachments = m.attachments.size();

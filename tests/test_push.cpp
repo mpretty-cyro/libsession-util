@@ -824,6 +824,8 @@ using push::NotificationContent;
 
 /// A Client holding messages, and the decisions made about them.
 struct Decider {
+    /// The application's word for the user; not English, so a test sees it is the caller's.
+    std::string you = "Vous";
     TempClient c;
     Notifications notifications{*c};
     int64_t ts = 1'700'000'000'000;
@@ -840,7 +842,7 @@ struct Decider {
 
     std::optional<NotificationContent> decide(
             const push::HandledPush& h, std::optional<client::ConversationId> open = std::nullopt) {
-        return notifications.decide(h, open);
+        return notifications.decide(h, you, open);
     }
 
     void privacy(config::notify_content level) {
@@ -900,7 +902,7 @@ TEST_CASE("Push decide: mentions are resolved", "[push_notifications]") {
 
     auto n = d.decide(d.arrived(alice, "@{} and @{}: look"_format(bob_hex, me), "h-1", "Alice"));
     REQUIRE(n);
-    CHECK(n->body == "@Bob and @You: look");
+    CHECK(n->body == "@Bob and @Vous: look");
 }
 
 TEST_CASE("Push decide: what shows nothing", "[push_notifications]") {
@@ -1053,7 +1055,7 @@ TEST_CASE(
     CHECK(h.outcome == push::Handled::unreadable);
     CHECK_FALSE(h.message);
 
-    auto n = x.notifications.decide(h);
+    auto n = x.notifications.decide(h, "You");
     REQUIRE(n);
     CHECK(n->kind == push::NotificationContent::Kind::generic);
 }
