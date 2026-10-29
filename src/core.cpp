@@ -232,6 +232,9 @@ void Core::_remove_timer(quic::TimerID& timer) {
 }
 
 void Core::_update_polling() {
+    // A one-shot Core asks for what it needs itself; see the one_shot option.
+    if (_one_shot)
+        return;
     if (_network && !_poll_timer)
         _poll_timer = _jq.add_timer(_poll_interval, [this] { _poll(); });
     else if (!_network)

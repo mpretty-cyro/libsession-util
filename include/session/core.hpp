@@ -253,6 +253,18 @@ struct predefined_seed {
 /// start until a network is attached.
 struct defer_account {};
 
+/// Opens a Core for a single job rather than for the life of an application -- a notification
+/// extension handling one push, which may have to fetch the message the push could not carry and
+/// is then torn down.
+///
+/// Attaching a network starts no polling, so there is no poll timer and no swarm subscription:
+/// the job asks for what it needs itself.  A layer built on Core reads one_shot() to skip its own
+/// start-up work for the same reason; Client skips the recovery that assumes the previous run has
+/// ended, which is false while the application that shares the database is merely suspended.
+///
+/// Pair it with a network built with `network::opt::one_shot`.
+struct one_shot {};
+
 /// Additional database migrations to apply during Core construction, on behalf of a layer built on
 /// top of Core (such as a Client holding conversations and message history in the same database).
 ///
@@ -297,6 +309,7 @@ concept CoreOption = sqlite::DatabaseOption<std::remove_cvref_t<T>> ||
                      std::same_as<std::remove_cvref_t<T>, predefined_seed> ||
                      std::same_as<std::remove_cvref_t<T>, callbacks> ||
                      std::same_as<std::remove_cvref_t<T>, defer_account> ||
+                     std::same_as<std::remove_cvref_t<T>, one_shot> ||
                      std::same_as<std::remove_cvref_t<T>, schema_extension>;
 
 class Core {
@@ -341,6 +354,9 @@ class Core {
     // Performs the non-templated part of Core construction: this executes any needed database
     // migrations, and then calls init() on each sub-component.
     void init();
+
+    // Set from the one_shot option; see there.
+    bool _one_shot = false;
 
     // Polling-related members and methods.
     std::chrono::milliseconds _poll_interval = 20s;
@@ -613,6 +629,7 @@ class Core {
             globals._predefined_seed = std::move(s->bytes);
         globals._defer_account =
                 detail::maybe_instance<defer_account>(std::forward<Opts>(opts)...).has_value();
+        _one_shot = detail::maybe_instance<core::one_shot>(std::forward<Opts>(opts)...).has_value();
         init();
     }
 
@@ -743,6 +760,9 @@ class Core {
     /// to call without waiting on it: what it finds is merged into `configs` like anything a poll
     /// brings in, and the retrieve cursor it records means the next poll carries on from there.
     void fetch_user_profile(std::function<void(bool found)> done);
+
+    /// Whether this Core was opened with the one_shot option.
+    bool one_shot() const { return _one_shot; }
 
     /// Encrypt and send a direct message to the given recipient.
     ///

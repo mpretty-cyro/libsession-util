@@ -406,6 +406,12 @@ void Client::_init() {
     _disk_loop = core.disk_loop();
     _disk_jq.emplace(*_disk_loop);
 
+    // Both of what follows is recovery for an application starting up, and a one-shot Core is not
+    // that: it shares the database with an application that may only be suspended, whose sends are
+    // still its own and live.  Marking them interrupted here would overwrite them.
+    if (core.one_shot())
+        return;
+
     // Core's send queue is in-memory, so anything still mid-flight when the last run ended is not
     // resumed and its outcome is unknowable.  Say so rather than guessing either way.
     auto c = core.database().conn();
