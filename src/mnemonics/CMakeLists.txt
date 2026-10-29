@@ -22,6 +22,13 @@ else()
     set(LANG_FILES ${LANG_FILES_ORDERED})
 endif()
 
+# file(WRITE) on every configure would leave the sources newer than their objects, and every build
+# would recompile them; configure_file leaves an output whose content is unchanged untouched.
+function(write_if_different path content)
+    file(WRITE "${path}.tmp" "${content}")
+    configure_file("${path}.tmp" "${path}" COPYONLY)
+endfunction()
+
 set(MNEMONIC_SOURCES "")
 set(LANG_EXTERNS "")
 set(LANG_LIST "")
@@ -68,7 +75,7 @@ foreach(f IN LISTS LANG_FILES)
     endforeach()
 
     set(GENERATED_CPP "${CMAKE_CURRENT_BINARY_DIR}/lang_${lang_var}.cpp")
-    file(WRITE "${GENERATED_CPP}"
+    write_if_different("${GENERATED_CPP}"
 "#include <session/mnemonics.hpp>
 
 namespace session::mnemonics {
@@ -91,7 +98,7 @@ ${WORDS_CODE}    }}
 endforeach()
 
 set(MASTER_CPP "${CMAKE_CURRENT_BINARY_DIR}/mnemonics_registry.cpp")
-file(WRITE "${MASTER_CPP}"
+write_if_different("${MASTER_CPP}"
 "#include <session/mnemonics.hpp>
 #include <array>
 
