@@ -1080,3 +1080,44 @@ TEST_CASE(
         CHECK(take_retrieves(*x.net).empty());
     }
 }
+
+TEST_CASE("Push stale: claims are pruned once they cannot matter", "[push_notifications]") {
+    Decider d;
+    SenderKeys alice, stranger;
+    approve(*d.c, alice.session_id);
+    auto claims = [&] {
+        return d.c->core.call_get([&] {
+            return d.c->core.database().conn().prepared_get<int64_t>(
+                    "SELECT COUNT(*) FROM notified");
+        });
+    };
+
+    auto a1 = d.arrived(alice, "one", "h-a1");
+    auto a2 = d.arrived(alice, "two", "h-a2");
+    auto r1 = d.arrived(stranger, "spam", "h-r1");
+    REQUIRE(d.decide(a1));
+    REQUIRE(d.decide(a2));
+    REQUIRE(d.decide(r1));
+    REQUIRE(claims() == 3);
+
+    SECTION("taken down: all but each conversation's newest go") {
+        d.c->conversation(client::ConversationId::dm(alice.session_id), await)->mark_read(await);
+        d.c->conversation(client::ConversationId::dm(stranger.session_id), await)->mark_read(await);
+        CHECK(d.notifications.stale().size() == 3);
+        CHECK(claims() == 2);
+
+        // The request's claim survives, so its next message still does not notify.
+        CHECK_FALSE(d.decide(d.arrived(stranger, "more spam", "h-r2")));
+    }
+
+    SECTION("old: a claim past its lifetime goes, each conversation's newest stays") {
+        d.c->core.call_get([&] {
+            d.c->core.database().conn().prepared_exec(
+                    "UPDATE notified SET at = ?",
+                    epoch_ms(clock_now_ms() - Notifications::CLAIM_LIFETIME - 1h));
+        });
+        CHECK(d.notifications.stale().empty());
+        CHECK(claims() == 2);
+        CHECK_FALSE(d.decide(d.arrived(stranger, "more spam", "h-r2")));
+    }
+}

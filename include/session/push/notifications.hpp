@@ -266,9 +266,15 @@ class Notifications {
     /// before posting, and post only on true -- the application and its notification extension can
     /// both receive the same message (a push racing a poll), and only one of them should show it.
     ///
-    /// A claim lasts as long as its message.  Throws if no such message exists.  Blocks until done;
-    /// callable from any thread.
+    /// A claim lasts until it can no longer matter -- its notification taken down, or
+    /// CLAIM_LIFETIME gone by -- except that a conversation's newest claim lasts as long as its
+    /// message, which is what keeps a message request to one notification; `stale` prunes them.
+    /// Throws if no such message exists.  Blocks until done; callable from any thread.
     bool claim(int64_t message_id);
+
+    /// How long a claim is kept: the longest a one-to-one message stays in a swarm, and so the
+    /// longest it can be delivered a second time and need deduplicating.
+    static constexpr auto CLAIM_LIFETIME = std::chrono::days{14};
 
     /// Shared by every generic notification as both identifier and thread.
     static constexpr std::string_view GENERIC_ID = "generic";
@@ -308,7 +314,8 @@ class Notifications {
             std::optional<client::ConversationId> open = std::nullopt);
 
     /// The identifiers of shown notifications whose messages have since been read or deleted, to
-    /// take down; each is reported once.  Call after `handle`, and whenever read state changes --
+    /// take down; each is reported once.  Also prunes claims that can no longer matter (see
+    /// `claim`).  Call after `handle`, and whenever read state changes --
     /// which, for what was read on another device, `handle` fetches.  Blocks; callable from any
     /// thread.
     std::vector<std::string> stale();

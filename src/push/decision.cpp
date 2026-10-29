@@ -232,11 +232,23 @@ SELECT n.message, m.swarm_hash
             gone.push_back(message);
             ids.push_back(notification_id(hash, message));
         }
-        // Marked rather than deleted: the claim still stands -- the message must not be shown
-        // again, and a request's first message is what keeps its later ones from notifying.
         auto now = epoch_ms(clock_now_ms());
         for (auto message : gone)
             c.prepared_exec("UPDATE notified SET removed = ? WHERE message = ?", now, message);
+
+        // Claims that can no longer matter go: one taken down, whose message is read or deleted and
+        // so would never be shown again anyway, and one older than any message stays in a swarm to
+        // be delivered a second time.  Each conversation's newest claim stays regardless: it is
+        // what holds a message request to the one notification for its first message.
+        c.prepared_exec(
+                R"(
+DELETE FROM notified
+ WHERE (removed IS NOT NULL OR at < ?)
+   AND message NOT IN (SELECT MAX(n.message) FROM notified n JOIN messages m ON m.id = n.message
+                        GROUP BY m.conversation)
+)",
+                now - std::chrono::duration_cast<std::chrono::milliseconds>(CLAIM_LIFETIME)
+                                .count());
         tx.commit();
         if (!ids.empty())
             log::debug(cat, "{} shown notification(s) now read or deleted", ids.size());
