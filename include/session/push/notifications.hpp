@@ -163,6 +163,9 @@ namespace err {
 /// The platform push service a device receives pushes through.
 enum class Service {
     apns,
+    /// APNs' development environment: what a build signed for development is issued tokens by.  Its
+    /// tokens are not valid in production, so a debug build registers here.
+    apns_sandbox,
     firebase,
     huawei,
 };

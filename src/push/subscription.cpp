@@ -214,6 +214,7 @@ void detail::mark_subscription_due(core::Core& core) {
 std::string_view to_string(Service s) {
     switch (s) {
         case Service::apns: return "apns";
+        case Service::apns_sandbox: return "apns-sandbox";
         case Service::firebase: return "firebase";
         case Service::huawei: return "huawei";
     }

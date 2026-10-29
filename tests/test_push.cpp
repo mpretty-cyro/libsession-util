@@ -465,9 +465,10 @@ struct Subscriber {
         notifications.emplace(*c);
     }
 
-    void subscribe(std::string token, bool force = false) {
+    void subscribe(
+            std::string token, bool force = false, push::Service service = push::Service::apns) {
         notifications->subscribe(
-                {push::Service::apns, std::move(token)},
+                {service, std::move(token)},
                 [this](auto r) { results.push_back(std::move(r)); },
                 force);
         TestHelper::drain(c->core);
@@ -598,6 +599,20 @@ TEST_CASE(
     // Nothing was recorded, so the next attempt sends again.
     s.subscribe("token-1");
     CHECK(take_sent_to(*s.net, "subscribe").size() == 1);
+}
+
+TEST_CASE("Push subscribe: each service by the push server's name for it", "[push_notifications]") {
+    for (auto [service, name] :
+         {std::pair{push::Service::apns, "apns"},
+          std::pair{push::Service::apns_sandbox, "apns-sandbox"},
+          std::pair{push::Service::firebase, "firebase"},
+          std::pair{push::Service::huawei, "huawei"}}) {
+        Subscriber s;
+        s.subscribe("token", false, service);
+        auto sent = take_sent_to(*s.net, "subscribe");
+        REQUIRE(sent.size() == 1);
+        CHECK(body_of(sent[0])[0]["service"] == name);
+    }
 }
 
 TEST_CASE("Push subscribe: unsubscribing", "[push_notifications]") {
