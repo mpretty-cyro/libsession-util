@@ -1,4 +1,8 @@
+#include <oxenc/bt_producer.h>
+
 #include <session/push/notifications.hpp>
+#include <session/push/payload.hpp>
+#include <session/session_encrypt.hpp>
 
 #include "test_client/common.hpp"
 
@@ -269,4 +273,132 @@ TEST_CASE("Push fetch: without a network it says so at once", "[push_notificatio
     REQUIRE(result->has_value());
     CHECK((*result)->result == FetchResult::no_network);
     CHECK_FALSE((*result)->message);
+}
+
+// ── Decoding a push's payload ───────────────────────────────────────────────────────────────────
+
+namespace {
+
+constexpr auto SWARM_HEX = "05fe94b7ad4b7f1cc1bb92671f1f0d243f226e115b33770465e82b503fc3e96e1f"sv;
+
+b32 push_key() {
+    b32 key;
+    random::fill(key);
+    return key;
+}
+
+/// What the push server sends: the bencoded list padded to a multiple of 256, encrypted with the
+/// subscription's key, nonce first.
+std::vector<std::byte> seal(const b32& key, std::string_view plain) {
+    std::string padded{plain};
+    if (auto over = padded.size() % 256)
+        padded.append(256 - over, '\0');
+    return encrypt_xchacha20(to_span(padded), key);
+}
+
+/// The push server's JSON metadata, with `extra` added.
+std::string metadata_json(nlohmann::json extra = nlohmann::json::object()) {
+    nlohmann::json m{
+            {"@", SWARM_HEX},
+            {"#", "h-pushed"},
+            {"n", 0},
+            {"t", 1'700'000'000'123},
+            {"z", 1'701'000'000'456}};
+    m.update(extra);
+    return m.dump();
+}
+
+std::string list_of(
+        std::string_view metadata, std::optional<std::string_view> body = std::nullopt) {
+    oxenc::bt_list_producer l;
+    l.append(metadata);
+    if (body)
+        l.append(*body);
+    return std::string{l.view()};
+}
+
+}  // namespace
+
+TEST_CASE("Push payload: a push carrying its message", "[push_notifications]") {
+    auto key = push_key();
+    auto p = push::decode(seal(key, list_of(metadata_json({{"l", 5}}), "hello")), key);
+
+    CHECK(p.swarm == SWARM_HEX);
+    CHECK(p.hash == "h-pushed");
+    CHECK(p.ns == config::Namespace::Default);
+    CHECK(p.timestamp == from_epoch_ms(1'700'000'000'123));
+    CHECK(p.expiry == from_epoch_ms(1'701'000'000'456));
+    REQUIRE(p.data);
+    CHECK(to_string_view(*p.data) == "hello");
+    CHECK(p.length == 5);
+    CHECK_FALSE(p.too_large);
+}
+
+TEST_CASE("Push payload: a message too large for the push", "[push_notifications]") {
+    auto key = push_key();
+
+    SECTION("with JSON metadata") {
+        auto p = push::decode(seal(key, list_of(metadata_json({{"l", 4000}, {"B", true}}))), key);
+        CHECK(p.too_large);
+        CHECK(p.length == 4000);
+        CHECK_FALSE(p.data);
+    }
+
+    SECTION("with the bencoded metadata APNs gets when there is no body") {
+        oxenc::bt_list_producer l;
+        {
+            auto d = l.append_dict();
+            d.append("#", "h-pushed");
+            d.append("@", SWARM_HEX);
+            d.append("B", 1);
+            d.append("l", 4000);
+            d.append("n", 0);
+            d.append("t", 1'700'000'000'123);
+            d.append("z", 1'701'000'000'456);
+        }
+        auto p = push::decode(seal(key, l.view()), key);
+        CHECK(p.swarm == SWARM_HEX);
+        CHECK(p.hash == "h-pushed");
+        CHECK(p.too_large);
+        CHECK(p.length == 4000);
+        CHECK(p.expiry == from_epoch_ms(1'701'000'000'456));
+        CHECK_FALSE(p.data);
+    }
+}
+
+TEST_CASE("Push payload: a subscription without message data", "[push_notifications]") {
+    auto key = push_key();
+    auto p = push::decode(seal(key, list_of(metadata_json({{"n", 5}}))), key);
+    CHECK(p.ns == config::Namespace::UserGroups);
+    CHECK_FALSE(p.data);
+    CHECK_FALSE(p.length);
+    CHECK_FALSE(p.too_large);
+}
+
+TEST_CASE("Push payload: the base64 text the push arrives as", "[push_notifications]") {
+    auto key = push_key();
+    auto sealed = seal(key, list_of(metadata_json(), "hello"));
+    auto p = push::decode(oxenc::to_base64(sealed), key);
+    CHECK(p.hash == "h-pushed");
+    CHECK_THROWS_AS(push::decode("not base64!"sv, key), push::malformed);
+}
+
+TEST_CASE("Push payload: what will not decode", "[push_notifications]") {
+    auto key = push_key();
+
+    // Another key: a push meant for a subscription made with a different one.
+    CHECK_THROWS_AS(
+            push::decode(seal(push_key(), list_of(metadata_json())), key), push::undecryptable);
+    CHECK_THROWS_AS(push::decode(to_span("short"), key), push::undecryptable);
+
+    CHECK_THROWS_AS(push::decode(seal(key, "not bencoded"), key), push::malformed);
+    CHECK_THROWS_AS(push::decode(seal(key, list_of("{not json")), key), push::malformed);
+    CHECK_THROWS_AS(
+            push::decode(seal(key, list_of(R"({"@":"05ab","#":"h","n":0,"t":1,"z":2})")), key),
+            push::malformed);
+    CHECK_THROWS_AS(
+            push::decode(seal(key, list_of(metadata_json({{"#", ""}}))), key), push::malformed);
+    CHECK_THROWS_AS(
+            push::decode(seal(key, list_of(metadata_json({{"B", true}}), "body")), key),
+            push::malformed);
 }

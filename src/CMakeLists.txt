@@ -257,6 +257,7 @@ target_link_libraries(core PUBLIC network)
 if(ENABLE_PUSH)
     add_libsession_util_library(push
         push/notifications.cpp
+        push/payload.cpp
     )
     target_link_libraries(
         push
