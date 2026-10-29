@@ -734,7 +734,7 @@ TEST_CASE("Push handle: a push without data", "[push_notifications]") {
     Extension x;
 
     SECTION("for a config that can wait for the next poll") {
-        x.handle(x.push_for(static_cast<int16_t>(config::Namespace::UserGroups), std::nullopt));
+        x.handle(x.push_for(static_cast<int16_t>(config::Namespace::UserProfile), std::nullopt));
         CHECK(x.only().outcome == push::Handled::nothing_to_do);
         CHECK(take_retrieves(*x.net).empty());
     }
@@ -757,6 +757,31 @@ TEST_CASE("Push handle: a push without data", "[push_notifications]") {
         x.handle(x.push_for(
                 static_cast<int16_t>(config::Namespace::ConvoInfoVolatile), std::nullopt));
         CHECK(take_retrieves(*x.net).size() == 1);
+    }
+
+    SECTION("for contacts and groups, whose names a notification shows") {
+        for (auto ns : {config::Namespace::Contacts, config::Namespace::UserGroups}) {
+            x.handle(x.push_for(static_cast<int16_t>(ns), std::nullopt));
+            auto sent = take_retrieves(*x.net);
+            REQUIRE(sent.size() == 1);
+            CHECK(retrieve_params(sent[0])["namespace"] == static_cast<int16_t>(ns));
+        }
+    }
+
+    SECTION("for a group's info, whose keys are fetched first") {
+        // Group swarms are not subscribed yet, so this exercises the ordering through the account
+        // swarm: keys, and only once they are in, the info they decrypt.
+        x.handle(x.push_for(static_cast<int16_t>(config::Namespace::GroupInfo), std::nullopt));
+        auto keys = take_retrieves(*x.net);
+        REQUIRE(keys.size() == 1);
+        CHECK(retrieve_params(keys[0])["namespace"] ==
+              static_cast<int16_t>(config::Namespace::GroupKeys));
+
+        x.reply(keys[0], answer({}));
+        auto info = take_retrieves(*x.net);
+        REQUIRE(info.size() == 1);
+        CHECK(retrieve_params(info[0])["namespace"] ==
+              static_cast<int16_t>(config::Namespace::GroupInfo));
     }
 }
 

@@ -247,9 +247,10 @@ class Notifications {
 
     /// Handles one push: decodes `enc_payload` (the base64 text of the push's `enc_payload` field)
     /// with this device's key, then receives the message it carried, or fetches the message it
-    /// could not carry, or fetches what a push without data stands for where that matters now --
-    /// the device group, whose change may be a key rotation or a link request, and the read state,
-    /// so that notifications for what was read elsewhere can be removed.
+    /// could not carry, or fetches what a push without data stands for where that matters now (see
+    /// `fetch_on_push`): the device group, whose change may be a key rotation or a link request;
+    /// the read state, so that notifications for what was read elsewhere can be removed; and
+    /// contacts and groups, so that a notification shows current names.
     ///
     /// Fetching is bounded by `deadline`; see `fetch_message`.  A message the push carried is
     /// received without touching the retrieve cursor, since a push is not a position in what any
@@ -320,8 +321,13 @@ class Notifications {
     /// thread.
     std::vector<std::string> stale();
 
-    /// Namespaces subscribed without message data whose pushes `handle` fetches for.
+    /// Namespaces subscribed without message data whose pushes `handle` fetches for, because what
+    /// changed there affects what a notification can show or whether a later message can be read.
     static bool fetch_on_push(config::Namespace ns);
+
+    /// The namespace `handle` fetches before `ns`, when `ns` is encrypted with keys that arrive in
+    /// another: a group's info and members, re-encrypted with its newest keys.
+    static std::optional<config::Namespace> fetch_first(config::Namespace ns);
 
     /// Fetches a message that a push announced but could not carry: the push server leaves out a
     /// body too large for a notification, and sends its namespace and swarm hash instead.  What is

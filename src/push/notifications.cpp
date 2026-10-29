@@ -303,6 +303,49 @@ namespace {
                 });
     }
 
+    // Fetches the message a push stands for -- one too large to carry, or what a push without data
+    // means -- and reports what came of it.
+    void fetch_for_push(
+            core::Core& core,
+            client::Client& client,
+            std::chrono::steady_clock::time_point until,
+            Payload p,
+            result_function<HandledPush> cb) {
+        auto ns = p.ns;
+        auto hash = p.hash;
+        start_fetch(
+                core,
+                ns,
+                std::move(hash),
+                until,
+                [&core, &client, until, p = std::move(p), cb = std::move(cb)](
+                        Outcome fetched) mutable {
+                    switch (fetched.result) {
+                        case FetchResult::found:
+                            return report_stored(
+                                    client, std::move(p), Handled::fetched, std::move(cb));
+                        case FetchResult::unreadable:
+                            return retry_unreadable(
+                                    core,
+                                    client,
+                                    std::move(p),
+                                    std::move(fetched.undecrypted),
+                                    *fetched.why,
+                                    until,
+                                    Handled::fetched,
+                                    std::move(cb));
+                        // A poll may have brought it in regardless, so look.
+                        case FetchResult::not_found:
+                            return report_stored(
+                                    client, std::move(p), Handled::not_found, std::move(cb));
+                        case FetchResult::failed:
+                        case FetchResult::no_network:
+                            return report_stored(
+                                    client, std::move(p), Handled::fetch_failed, std::move(cb));
+                    }
+                });
+    }
+
 }  // namespace
 
 bool Notifications::claim(int64_t message_id) {
@@ -322,7 +365,29 @@ bool Notifications::fetch_on_push(config::Namespace ns) {
         case config::Namespace::Devices: return true;
         // What was read on another device, so that its notifications here can be removed.
         case config::Namespace::ConvoInfoVolatile: return true;
+        // A contact's name or our nickname for them, so a notification does not show a stale one.
+        case config::Namespace::Contacts: return true;
+        // Groups we have left, been removed from, or that were deleted, whose messages could no
+        // longer be decrypted and should not notify.
+        case config::Namespace::UserGroups: return true;
+        // A group's keys, without which its later messages will not decrypt; and its name and
+        // members, for the same reason as Contacts.  Group swarms are not subscribed until Client
+        // holds groups, so these wait on that.
+        case config::Namespace::GroupKeys:
+        case config::Namespace::GroupInfo:
+        case config::Namespace::GroupMembers: return true;
+        // Our own profile changes nothing a notification shows.
         default: return false;
+    }
+}
+
+std::optional<config::Namespace> Notifications::fetch_first(config::Namespace ns) {
+    switch (ns) {
+        // Re-encrypted with the group's newest keys whenever those change, so fetched before them
+        // they may not decrypt.
+        case config::Namespace::GroupInfo:
+        case config::Namespace::GroupMembers: return config::Namespace::GroupKeys;
+        default: return std::nullopt;
     }
 }
 
@@ -392,40 +457,18 @@ void Notifications::handle(
 
     if (!p.too_large && !fetch_on_push(p.ns))
         return report(std::move(cb), Handled::nothing_to_do, std::move(p));
-
     auto ns = p.ns;
-    auto hash = p.hash;
-    start_fetch(
-            *core,
-            ns,
-            std::move(hash),
-            until,
-            [core, client, until, report, p = std::move(p), cb = std::move(cb)](
-                    Outcome fetched) mutable {
-                switch (fetched.result) {
-                    case FetchResult::found:
-                        return report_stored(
-                                *client, std::move(p), Handled::fetched, std::move(cb));
-                    case FetchResult::unreadable:
-                        return retry_unreadable(
-                                *core,
-                                *client,
-                                std::move(p),
-                                std::move(fetched.undecrypted),
-                                *fetched.why,
-                                until,
-                                Handled::fetched,
-                                std::move(cb));
-                    // A poll may have brought it in regardless, so look.
-                    case FetchResult::not_found:
-                        return report_stored(
-                                *client, std::move(p), Handled::not_found, std::move(cb));
-                    case FetchResult::failed:
-                    case FetchResult::no_network:
-                        return report_stored(
-                                *client, std::move(p), Handled::fetch_failed, std::move(cb));
-                }
-            });
+
+    auto fetch = [core, client, until, p = std::move(p), cb = std::move(cb)]() mutable {
+        fetch_for_push(*core, *client, until, std::move(p), std::move(cb));
+    };
+    // Some namespaces are encrypted with keys that arrive in another, so that one comes first or
+    // what is fetched may not be readable.
+    if (auto first = fetch_first(ns))
+        start_fetch(
+                *core, *first, "", until, [fetch = std::move(fetch)](Outcome) mutable { fetch(); });
+    else
+        fetch();
 }
 
 void Notifications::fetch_message(
