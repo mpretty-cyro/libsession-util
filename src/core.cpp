@@ -269,88 +269,56 @@ static constexpr std::array POLL_NAMESPACES = {
         config::Namespace::Devices,
         config::Namespace::AccountPubkeys};
 
-// Ceiling on continuation rounds within one poll.  A well-behaved node exhausts a namespace in far
-// fewer; this exists so that a node whose `more` never goes false cannot poll indefinitely.
-static constexpr int POLL_MAX_ROUNDS = 20;
+std::optional<retrieved_namespace> decode_retrieved(const nlohmann::json& res, int16_t ns_val) {
+    auto code_it = res.find("code");
+    if (code_it == res.end() || code_it->get<int>() != 200) {
+        log::warning(cat, "Retrieve of namespace {} failed: {}", ns_val, res.dump());
+        return std::nullopt;
+    }
+    auto body_it = res.find("body");
+    if (body_it == res.end())
+        return std::nullopt;
+    auto msgs_it = body_it->find("messages");
+    if (msgs_it == body_it->end() || !msgs_it->is_array())
+        return std::nullopt;
 
-/// One namespace's slice of a batch retrieve response, decoded but not yet handled.
-///
-/// The decoded bytes are kept beside the messages because `SwarmMessage::data` spans into them:
-/// the messages are only usable while this object is.
-struct retrieved_namespace {
-    std::vector<std::vector<std::byte>> data;
-    std::vector<SwarmMessage> messages;
-    /// The node says it is holding more past what it returned.  A retrieve is capped by the
-    /// storage server, so this is how a namespace reports that one round did not exhaust it.
-    bool more = false;
-};
+    retrieved_namespace got;
+    if (auto m = body_it->find("more"); m != body_it->end() && m->is_boolean())
+        got.more = m->get<bool>();
 
-namespace {
+    log::debug(cat, "Retrieved {} message(s) from namespace {}", msgs_it->size(), ns_val);
 
-    /// Decodes one result of a batch retrieve, or nothing where the node did not answer it.
-    ///
-    /// **Nothing and an empty answer are different**, and the difference is load-bearing: a
-    /// namespace that failed or answered malformedly is not reported to its handler at all, while
-    /// one that answered with nothing is -- "we asked and there is nothing" is an answer, and some
-    /// handlers act on it.
-    ///
-    /// Takes no node and touches no database, deliberately. Which node an answer came from matters
-    /// to whoever called: the retrieve cursor is kept per node and has to stay with the one that
-    /// produced it, and a decoder that knew about nodes is the shape in which one node's cursor
-    /// gets written from another node's response -- silently, because each node's cursor is
-    /// individually plausible.
-    std::optional<retrieved_namespace> decode_retrieved(const nlohmann::json& res, int16_t ns_val) {
-        auto code_it = res.find("code");
-        if (code_it == res.end() || code_it->get<int>() != 200) {
-            log::warning(cat, "Retrieve of namespace {} failed: {}", ns_val, res.dump());
-            return std::nullopt;
-        }
-        auto body_it = res.find("body");
-        if (body_it == res.end())
-            return std::nullopt;
-        auto msgs_it = body_it->find("messages");
-        if (msgs_it == body_it->end() || !msgs_it->is_array())
-            return std::nullopt;
+    for (const auto& msg : *msgs_it) {
+        auto data_it = msg.find("data");
+        if (data_it == msg.end() || !data_it->is_string())
+            continue;
+        auto& decoded = got.data.emplace_back();
+        auto b64 = data_it->get<std::string_view>();
+        decoded.reserve(oxenc::from_base64_size(b64.size()));
+        oxenc::from_base64(b64.begin(), b64.end(), std::back_inserter(decoded));
 
-        retrieved_namespace got;
-        if (auto m = body_it->find("more"); m != body_it->end() && m->is_boolean())
-            got.more = m->get<bool>();
+        SwarmMessage swarm_msg;
+        swarm_msg.data = {decoded.data(), decoded.size()};
 
-        log::debug(cat, "Retrieved {} message(s) from namespace {}", msgs_it->size(), ns_val);
+        if (auto h = msg.find("hash"); h != msg.end() && h->is_string())
+            swarm_msg.hash = h->get<std::string>();
 
-        for (const auto& msg : *msgs_it) {
-            auto data_it = msg.find("data");
-            if (data_it == msg.end() || !data_it->is_string())
-                continue;
-            auto& decoded = got.data.emplace_back();
-            auto b64 = data_it->get<std::string_view>();
-            decoded.reserve(oxenc::from_base64_size(b64.size()));
-            oxenc::from_base64(b64.begin(), b64.end(), std::back_inserter(decoded));
+        if (auto t = msg.find("timestamp"); t != msg.end() && t->is_number_integer())
+            swarm_msg.timestamp = from_epoch_ms(t->get<int64_t>());
 
-            SwarmMessage swarm_msg;
-            swarm_msg.data = {decoded.data(), decoded.size()};
+        if (auto e = msg.find("expiry"); e != msg.end() && e->is_number_integer())
+            swarm_msg.expiry = from_epoch_ms(e->get<int64_t>());
 
-            if (auto h = msg.find("hash"); h != msg.end() && h->is_string())
-                swarm_msg.hash = h->get<std::string>();
-
-            if (auto t = msg.find("timestamp"); t != msg.end() && t->is_number_integer())
-                swarm_msg.timestamp = from_epoch_ms(t->get<int64_t>());
-
-            if (auto e = msg.find("expiry"); e != msg.end() && e->is_number_integer())
-                swarm_msg.expiry = from_epoch_ms(e->get<int64_t>());
-
-            got.messages.push_back(std::move(swarm_msg));
-        }
-
-        // A node claiming more while returning nothing cannot be continued: there is no new hash to
-        // move the cursor to, so another round would ask the same question and get the same answer.
-        // Reported as finished instead, or a handler waiting on `is_final` would wait for one that
-        // never comes.
-        got.more = got.more && !got.messages.empty();
-        return got;
+        got.messages.push_back(std::move(swarm_msg));
     }
 
-}  // namespace
+    // A node claiming more while returning nothing cannot be continued: there is no new hash to
+    // move the cursor to, so another round would ask the same question and get the same answer.
+    // Reported as finished instead, or a handler waiting on `is_final` would wait for one that
+    // never comes.
+    got.more = got.more && !got.messages.empty();
+    return got;
+}
 
 /// How long the first member's config is left open for others to add to.
 ///

@@ -233,6 +233,11 @@ class Client {
     void message(int64_t id, result_function<std::optional<Message>> cb);
     std::optional<Message> message(int64_t id, await_t);
 
+    /// A single message by the hash of its copy in our own swarm (`Message::hash`), or nullopt if
+    /// none is stored.  The hash is what a push notification names a message by.
+    void message_by_hash(std::string hash, result_function<std::optional<Message>> cb);
+    std::optional<Message> message_by_hash(std::string hash, await_t);
+
     /// Blocks or unblocks an account named by id.
     ///
     /// The same operation as `DM::set_blocked`, and forwards to it; it is here as well because
@@ -1180,6 +1185,7 @@ class Client {
             std::optional<MessageCursor> before,
             bool include_deleted);
     std::optional<Message> _message(int64_t id);
+    std::optional<Message> _message_by_hash(std::string_view hash);
     int64_t _send_message(const ConversationId& id, const OutgoingMessage& msg);
     int64_t _send_message(
             const ConversationId& id,

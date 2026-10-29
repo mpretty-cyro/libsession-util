@@ -1783,6 +1783,10 @@ std::optional<Message> Client::message(int64_t id, await_t) {
     return call_get([this, id] { return _message(id); });
 }
 
+std::optional<Message> Client::message_by_hash(std::string hash, await_t) {
+    return call_get([this, hash = std::move(hash)] { return _message_by_hash(hash); });
+}
+
 int64_t Client::send_message(const ConversationId& id, OutgoingMessage msg, await_t) {
     return send_message(id, std::move(msg), nullptr, await);
 }
@@ -1836,6 +1840,10 @@ DM Client::open_dm(const ConversationId& id, await_t) {
 
 void Client::message(int64_t id, result_function<std::optional<Message>> cb) {
     _async([this, id] { return _message(id); }, std::move(cb));
+}
+
+void Client::message_by_hash(std::string hash, result_function<std::optional<Message>> cb) {
+    _async([this, hash = std::move(hash)] { return _message_by_hash(hash); }, std::move(cb));
 }
 
 uint64_t Client::save_attachment(
@@ -4199,6 +4207,14 @@ std::optional<Message> Client::_message(int64_t id) {
     if (found.empty())
         return std::nullopt;
     return std::move(found.front());
+}
+
+std::optional<Message> Client::_message_by_hash(std::string_view hash) {
+    auto id = core.database().conn().prepared_maybe_get<int64_t>(
+            "SELECT id FROM messages WHERE swarm_hash = ?", hash);
+    if (!id)
+        return std::nullopt;
+    return _message(*id);
 }
 
 std::optional<std::string> Client::_message_debug(int64_t message_id) {

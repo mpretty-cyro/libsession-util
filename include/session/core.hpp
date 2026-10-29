@@ -151,6 +151,10 @@ namespace session {
 class TestHelper;
 }
 
+namespace session::push::detail {
+class CoreAccess;
+}
+
 // Forward declared rather than including SessionProtos.pb.h so that consumers of this header do not
 // inherit a protobuf include dependency; only the send_dm() Content overload needs the full type.
 namespace SessionProtos {
@@ -314,6 +318,10 @@ concept CoreOption = sqlite::DatabaseOption<std::remove_cvref_t<T>> ||
 
 class Core {
     friend class session::TestHelper;  // for unit tests
+
+    // Push notification handling is built separately (ENABLE_PUSH) but fetches from the swarm the
+    // way polling does; this lends it the private machinery for that without making it public.
+    friend class session::push::detail::CoreAccess;
 
     // Declared first, so it is constructed first and destroyed last: it must outlive every
     // component that uses it, and `_jq` below.
