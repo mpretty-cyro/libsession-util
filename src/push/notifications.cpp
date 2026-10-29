@@ -127,8 +127,12 @@ namespace {
                 log::warning(cat, "Failed to parse pushed message fetch response: {}", e.what());
             }
         } else {
-            log::warning(
+            // Once the fetch has its answer, the members still being asked are abandoned -- the
+            // one-shot network is usually torn down straight after -- so their failing is expected
+            // and not worth a warning.
+            log::log(
                     cat,
+                    op->concluded ? log::Level::debug : log::Level::warn,
                     "Pushed message fetch from {} failed: {}",
                     res.node.remote_pubkey.hex(),
                     res.timeout ? "timed out" : "request failed");

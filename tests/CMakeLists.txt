@@ -149,6 +149,9 @@ if(BUILD_LIVE_TESTS)
     target_link_libraries(testLive PRIVATE
         test_libs
         Catch2::Catch2)
+    if(ENABLE_PUSH)
+        target_sources(testLive PRIVATE live/test_push_fetch.cpp)
+    endif()
 endif()
 
 if(BUILD_LIVE_TESTS)
