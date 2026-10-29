@@ -8,10 +8,12 @@
 /// carry -- and each of them needs the same answers.  Transcribing them separately is how one copy
 /// ends up disagreeing with the storage server.
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <nlohmann/json_fwd.hpp>
 #include <optional>
+#include <session/config/namespaces.hpp>
 #include <session/core/swarm_message.hpp>
 #include <session/format.hpp>
 #include <session/network/session_network_types.hpp>
@@ -127,6 +129,23 @@ inline std::string delete_signature_value(std::span<const std::string> hashes) {
         to_sign += h;
     return to_sign;
 }
+
+// The namespaces an account's swarm is polled for.  Push subscriptions are derived from this too,
+// so that a namespace added to the poll cannot be left out of them unnoticed.
+//
+// Order matters: the batch's results are handled in this order, so a namespace whose contents
+// another one's depend on has to come first.  The configs lead because a message arriving in the
+// same poll may be from a contact those configs are what tells us about; among themselves,
+// ConvoInfoVolatile comes last because it refers to conversations that Contacts and UserGroups
+// are what establish.
+inline constexpr std::array POLL_NAMESPACES = {
+        config::Namespace::UserProfile,
+        config::Namespace::Contacts,
+        config::Namespace::UserGroups,
+        config::Namespace::ConvoInfoVolatile,
+        config::Namespace::Default,
+        config::Namespace::Devices,
+        config::Namespace::AccountPubkeys};
 
 // Ceiling on continuation rounds when retrieving from one node.  A well-behaved node exhausts a
 // namespace in far fewer; this exists so that a node whose `more` never goes false cannot be asked

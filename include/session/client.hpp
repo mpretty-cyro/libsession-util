@@ -66,12 +66,20 @@ class DataExtractionNotification;
 class UnsendRequest;
 }  // namespace SessionProtos
 
+namespace session::push::detail {
+class ClientAccess;
+}
+
 namespace session::client {
 
 using namespace std::literals;
 
 class Client {
     friend class session::TestHelper;  // for unit tests
+
+    // Push notification handling is built separately (ENABLE_PUSH) and reports its results the way
+    // Client reports its own; this lends it the dispatcher for that.
+    friend class session::push::detail::ClientAccess;
 
     // A conversation *is* part of Client's interface, split off rather than added to: what these
     // call is the same private machinery the methods here do.

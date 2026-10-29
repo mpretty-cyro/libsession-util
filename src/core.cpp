@@ -255,20 +255,6 @@ void Core::set_poll_interval(std::chrono::milliseconds interval) {
     });
 }
 
-// Order matters: the batch's results are handled in this order, so a namespace whose contents
-// another one's depend on has to come first.  The configs lead because a message arriving in the
-// same poll may be from a contact those configs are what tells us about; among themselves,
-// ConvoInfoVolatile comes last because it refers to conversations that Contacts and UserGroups
-// are what establish.
-static constexpr std::array POLL_NAMESPACES = {
-        config::Namespace::UserProfile,
-        config::Namespace::Contacts,
-        config::Namespace::UserGroups,
-        config::Namespace::ConvoInfoVolatile,
-        config::Namespace::Default,
-        config::Namespace::Devices,
-        config::Namespace::AccountPubkeys};
-
 std::optional<retrieved_namespace> decode_retrieved(const nlohmann::json& res, int16_t ns_val) {
     auto code_it = res.find("code");
     if (code_it == res.end() || code_it->get<int>() != 200) {

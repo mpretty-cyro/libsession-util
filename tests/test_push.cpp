@@ -1,4 +1,5 @@
 #include <oxenc/bt_producer.h>
+#include <sodium/crypto_sign.h>
 
 #include <session/push/notifications.hpp>
 #include <session/push/payload.hpp>
@@ -401,4 +402,240 @@ TEST_CASE("Push payload: what will not decode", "[push_notifications]") {
     CHECK_THROWS_AS(
             push::decode(seal(key, list_of(metadata_json({{"B", true}}), "body")), key),
             push::malformed);
+}
+
+// ── Subscribing ─────────────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+/// Requests the subscription code has sent to `endpoint`, taken away.
+std::vector<MockNetwork::SentRequest> take_sent_to(MockNetwork& net, std::string_view endpoint) {
+    std::vector<MockNetwork::SentRequest> found, others;
+    for (auto& r : std::exchange(net.sent_requests, {}))
+        (r.request.endpoint == endpoint ? found : others).push_back(std::move(r));
+    net.sent_requests = std::move(others);
+    return found;
+}
+
+nlohmann::json body_of(const MockNetwork::SentRequest& r) {
+    return parse_json(*r.request.body);
+}
+
+/// Whether `req` is signed by the account it names over `signed_value`.
+bool signature_valid(const nlohmann::json& req, std::string_view signed_value) {
+    auto pk = oxenc::from_hex(req["session_ed25519"].get<std::string>());
+    auto sig = oxenc::from_hex(req["signature"].get<std::string>());
+    if (pk.size() != 32 || sig.size() != 64)
+        return false;
+    return crypto_sign_verify_detached(
+                   reinterpret_cast<const unsigned char*>(sig.data()),
+                   reinterpret_cast<const unsigned char*>(signed_value.data()),
+                   signed_value.size(),
+                   reinterpret_cast<const unsigned char*>(pk.data())) == 0;
+}
+
+std::string accepted(size_t n = 1) {
+    auto a = nlohmann::json::array();
+    for (size_t i = 0; i < n; i++)
+        a.push_back({{"success", true}, {"added", true}});
+    return a.dump();
+}
+
+/// An application's Client (not one-shot: subscribing is the application's job) with a mock
+/// network, and its push handling.
+struct Subscriber {
+    TempClient c;
+    MockNetwork* net;
+    std::optional<Notifications> notifications;
+    std::vector<Expected<push::SubscribeResult>> results;
+
+    Subscriber() {
+        net = attach_mock_network(c->core);
+        notifications.emplace(*c);
+    }
+
+    void subscribe(std::string token, bool force = false) {
+        notifications->subscribe(
+                {push::Service::apns, std::move(token)},
+                [this](auto r) { results.push_back(std::move(r)); },
+                force);
+        TestHelper::drain(c->core);
+    }
+
+    void reply(MockNetwork::SentRequest& r, std::string body) {
+        r.callback(true, false, 200, {}, std::move(body));
+        TestHelper::drain(c->core);
+    }
+
+    /// Subscribes with `token` and accepts it.
+    void subscribed(std::string token) {
+        subscribe(std::move(token));
+        auto sent = take_sent_to(*net, "subscribe");
+        REQUIRE(sent.size() == 1);
+        reply(sent[0], accepted());
+        REQUIRE(results.back().has_value());
+        REQUIRE(*results.back() == push::SubscribeResult::subscribed);
+    }
+};
+
+}  // namespace
+
+TEST_CASE("Push subscribe: a signed request for the account's namespaces", "[push_notifications]") {
+    Subscriber s;
+    s.subscribe("token-1");
+
+    auto sent = take_sent_to(*s.net, "subscribe");
+    REQUIRE(sent.size() == 1);
+    auto& dest = std::get<network::ServerDestination>(sent[0].request.destination);
+    CHECK(dest.host == "push.getsession.org");
+    CHECK(dest.method == "POST");
+
+    auto body = body_of(sent[0]);
+    REQUIRE(body.is_array());
+    REQUIRE(body.size() == 1);
+    auto& req = body[0];
+    CHECK(req["pubkey"] == s.c->core.globals.session_id_hex());
+    CHECK(req["service"] == "apns");
+    CHECK(req["service_info"]["token"] == "token-1");
+    CHECK(req["data"] == true);
+    auto key = s.notifications->encryption_key();
+    CHECK(req["enc_key"] == oxenc::to_hex(key.begin(), key.end()));
+
+    // Everything the account polls but its own published keys (-21), in ascending order.
+    CHECK(req["namespaces"] == std::vector<int16_t>{0, 2, 3, 4, 5, 21});
+
+    CHECK(signature_valid(
+            req,
+            "MONITOR{}{}10,2,3,4,5,21"_format(
+                    req["pubkey"].get<std::string>(), req["sig_ts"].get<int64_t>())));
+
+    CHECK(s.results.empty());
+    s.reply(sent[0], accepted());
+    REQUIRE(s.results.size() == 1);
+    REQUIRE(s.results[0].has_value());
+    CHECK(*s.results[0] == push::SubscribeResult::subscribed);
+}
+
+TEST_CASE(
+        "Push subscribe: sends only when something changed or it is due", "[push_notifications]") {
+    Subscriber s;
+    s.subscribed("token-1");
+
+    SECTION("the same device again") {
+        s.subscribe("token-1");
+        CHECK(take_sent_to(*s.net, "subscribe").empty());
+        REQUIRE(s.results.back().has_value());
+        CHECK(*s.results.back() == push::SubscribeResult::unchanged);
+    }
+
+    SECTION("forced") {
+        s.subscribe("token-1", /*force=*/true);
+        CHECK(take_sent_to(*s.net, "subscribe").size() == 1);
+    }
+
+    SECTION("a day later") {
+        auto recorded = nlohmann::json::parse(*s.c->core.globals.get_text("push_subscription"));
+        recorded["at"] = recorded["at"].get<int64_t>() - 25 * 60 * 60 * 1000;
+        s.c->core.globals.set("push_subscription", recorded.dump());
+
+        s.subscribe("token-1");
+        CHECK(take_sent_to(*s.net, "subscribe").size() == 1);
+    }
+
+    SECTION("a new token, which also unsubscribes the old one") {
+        s.subscribe("token-2");
+        auto sent = take_sent_to(*s.net, "subscribe");
+        REQUIRE(sent.size() == 1);
+        CHECK(body_of(sent[0])[0]["service_info"]["token"] == "token-2");
+        CHECK(take_sent_to(*s.net, "unsubscribe").empty());
+
+        s.reply(sent[0], accepted());
+        auto old = take_sent_to(*s.net, "unsubscribe");
+        REQUIRE(old.size() == 1);
+        auto req = body_of(old[0])[0];
+        CHECK(req["service_info"]["token"] == "token-1");
+        CHECK(signature_valid(
+                req,
+                "UNSUBSCRIBE{}{}"_format(
+                        req["pubkey"].get<std::string>(), req["sig_ts"].get<int64_t>())));
+    }
+}
+
+TEST_CASE(
+        "Push subscribe: a refusal or failure is reported and not recorded",
+        "[push_notifications]") {
+    Subscriber s;
+    s.subscribe("token-1");
+    auto sent = take_sent_to(*s.net, "subscribe");
+    REQUIRE(sent.size() == 1);
+
+    SECTION("refused") {
+        s.reply(sent[0], R"([{"error": 3, "message": "invalid signature"}])");
+        REQUIRE(s.results.size() == 1);
+        REQUIRE_FALSE(s.results[0].has_value());
+        CHECK(s.results[0].error().code == push::err::rejected);
+    }
+
+    SECTION("not reached") {
+        sent[0].callback(false, true, 0, {}, std::nullopt);
+        TestHelper::drain(s.c->core);
+        REQUIRE(s.results.size() == 1);
+        REQUIRE_FALSE(s.results[0].has_value());
+        CHECK(s.results[0].error().code == push::err::request_failed);
+    }
+
+    // Nothing was recorded, so the next attempt sends again.
+    s.subscribe("token-1");
+    CHECK(take_sent_to(*s.net, "subscribe").size() == 1);
+}
+
+TEST_CASE("Push subscribe: unsubscribing", "[push_notifications]") {
+    Subscriber s;
+    std::vector<Expected<bool>> results;
+    auto unsubscribe = [&] {
+        s.notifications->unsubscribe([&](auto r) { results.push_back(std::move(r)); });
+        TestHelper::drain(s.c->core);
+    };
+
+    // Nothing to remove.
+    unsubscribe();
+    REQUIRE(results.size() == 1);
+    REQUIRE(results[0].has_value());
+    CHECK(*results[0]);
+    CHECK(take_sent_to(*s.net, "unsubscribe").empty());
+
+    s.subscribed("token-1");
+    unsubscribe();
+    auto sent = take_sent_to(*s.net, "unsubscribe");
+    REQUIRE(sent.size() == 1);
+    CHECK(body_of(sent[0])[0]["service_info"]["token"] == "token-1");
+    s.reply(sent[0], R"([{"success": true, "removed": true}])");
+    REQUIRE(results.size() == 2);
+    REQUIRE(results[1].has_value());
+    CHECK(*results[1]);
+
+    // Gone, so subscribing again sends.
+    s.subscribe("token-1");
+    CHECK(take_sent_to(*s.net, "subscribe").size() == 1);
+}
+
+TEST_CASE("Push subscribe: the encryption key is kept", "[push_notifications]") {
+    TempClient c;
+    auto key = Notifications{*c}.encryption_key();
+    CHECK(Notifications{*c}.encryption_key() == key);
+
+    // And read by a one-shot Client on the same database, as an extension would.
+    c.reopen(core::one_shot{});
+    CHECK(Notifications{*c}.encryption_key() == key);
+}
+
+TEST_CASE("Push subscribe: without a network", "[push_notifications]") {
+    TempClient c;
+    Notifications notifications{*c};
+    std::optional<Expected<push::SubscribeResult>> result;
+    notifications.subscribe({push::Service::firebase, "t"}, [&](auto r) { result = std::move(r); });
+    TestHelper::drain(c->core);
+    REQUIRE(result);
+    REQUIRE_FALSE(result->has_value());
+    CHECK(result->error().code == client::err::network_unavailable);
 }

@@ -258,6 +258,7 @@ if(ENABLE_PUSH)
     add_libsession_util_library(push
         push/notifications.cpp
         push/payload.cpp
+        push/subscription.cpp
     )
     target_link_libraries(
         push
