@@ -4221,6 +4221,10 @@ int64_t Client::_badge_count() {
     // A request is a one-to-one conversation with someone not approved, other than ourselves; it
     // counts once however many messages it holds, so a stranger cannot inflate the badge.
     // Mentions-only is a group setting and reads as "all" on a one-to-one conversation.
+    //
+    // TODO: once Client holds groups, a group invitation not yet accepted counts once, as a request
+    // does; and a mentions-only group counts its unread mentions, once Client records which
+    // messages mention us -- until then such a group counts nothing (the clause below).
     std::vector<std::byte> me;
     if (core.globals.have_account())
         me = to_vector(core.globals.session_id());

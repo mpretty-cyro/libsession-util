@@ -152,6 +152,9 @@ std::optional<NotificationContent> Notifications::decide(
         return std::nullopt;
     if (convo->notifications() == config::notify_mode::disabled)
         return std::nullopt;
+    // TODO: in a mentions-only group, show only a message that mentions us (an `@` of our id or a
+    // reply to one of our messages), once Client holds groups and records mentions.  On a
+    // one-to-one conversation mentions-only reads as "all", so nothing is missing until then.
     if (convo->mute_until() > std::chrono::floor<std::chrono::seconds>(clock_now()))
         return std::nullopt;
 

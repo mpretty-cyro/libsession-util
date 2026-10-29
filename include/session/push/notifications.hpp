@@ -11,7 +11,7 @@
 #include <string>
 
 /// Push notification handling: what a device needs to receive Session messages through its
-/// platform's push service (APNs, FCM) while the application isn't running.
+/// platform's push service (APNs, FCM, etc.) while the application isn't running.
 ///
 /// Built as its own library (`libsession::push`, `ENABLE_PUSH`) because only mobile clients receive
 /// pushes; a desktop or command-line build leaves it out.  It sits on a Client, and so on the Core
@@ -277,6 +277,10 @@ class Notifications {
 
     /// Decides what, if anything, to show for a handled push, and claims it: a result means this
     /// process has the claim and should post it; nullopt means show nothing.
+    ///
+    /// Takes what `handle` reported, so it always runs after the push's message has been received:
+    /// stored, with any conversation that receiving it created already there to read the settings
+    /// of.  (A message request's conversation is created by its first message, for one.)
     ///
     /// Shown: an incoming message, unread, not deleted, in a conversation that is neither muted
     /// nor silenced, from a sender not blocked -- and for a message request only its first, until
