@@ -36,6 +36,9 @@ enum class FetchResult {
     /// asked yet; the application's next poll picks it up.
     not_found,
 
+    /// A member had the message, and it did not decrypt.
+    unreadable,
+
     /// No member answered usably within the deadline.
     failed,
 
@@ -71,6 +74,11 @@ enum class Handled {
 
     /// The message had to be fetched, and no member answered in time, or there is no network.
     fetch_failed,
+
+    /// The message arrived, or was fetched, and did not decrypt -- even after fetching the device
+    /// group, where the failure was a key we lacked, which is what a rotation we have not yet heard
+    /// about looks like.
+    unreadable,
 
     /// For a swarm this device does not hold: not our account, and no group we know.
     not_ours,
@@ -276,16 +284,15 @@ class Notifications {
     /// Mentions-only is a group setting and reads as "all" on a one-to-one conversation.
     ///
     /// Generic: a push whose payload would not decrypt or decode, and a one-to-one message that
-    /// had to be fetched and could not be.  Everything else is silent: configs, control messages
-    /// (none of which Client stores), our own messages, and pushes for swarms we do not hold.
+    /// had to be fetched and could not be, or that did not decrypt.  Everything else is silent:
+    /// configs, control messages (none of which Client stores), our own messages, and pushes for
+    /// swarms we do not hold.
     ///
     /// The content follows the privacy setting (`config::Local::get_notification_content`).
     ///
     /// Blocks until done; callable from any thread.
     ///
-    /// TODO: a one-to-one message that would not decrypt should get the generic notification, but
-    /// Core reports no per-message decrypt failure to tell it from a message Client chose not to
-    /// store.  Groups, group titles and mentions wait on Client holding groups.
+    /// TODO: groups, group titles and mentions, once Client holds groups.
     std::optional<NotificationContent> decide(
             const HandledPush& handled, std::optional<client::ConversationId> open = std::nullopt);
 

@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 #include <oxen/log.hpp>
+#include <session/format.hpp>
 #include <session/network/session_network.hpp>
 
 #include "client_access.hpp"
@@ -15,6 +16,7 @@ static auto cat = log::Cat("push");
 
 using detail::ClientAccess;
 using detail::CoreAccess;
+using namespace session::literals;
 
 namespace {
 
@@ -25,12 +27,21 @@ namespace {
     /// before any of this is read.  Holds the Core and Client by pointer rather than holding the
     /// Notifications, which may be gone by the time an answer lands; both outlive anything on
     /// Core's queue, which is cancelled as Core goes.
+    /// How a fetch ended, before any stored message is looked up.
+    struct Outcome {
+        FetchResult result;
+        /// For `unreadable`: the message's bytes and why they did not decrypt, so that a caller
+        /// that can fix the cause -- fetching new keys -- can try them again.
+        std::vector<std::byte> undecrypted;
+        std::optional<core::MessageDecryptFailure> why;
+    };
+
     struct Fetch {
         core::Core* core;
-        client::Client* client;
         config::Namespace ns;
+        /// The message wanted; empty to bring the namespace up to date from one member instead.
         std::string hash;
-        result_function<FetchedMessage> cb;
+        std::function<void(Outcome)> done;
         std::chrono::steady_clock::time_point deadline;
 
         /// Members still being asked in the current round.
@@ -50,28 +61,28 @@ namespace {
             const std::shared_ptr<Fetch>& op, std::optional<network::service_node> node, int round);
     void member_done(const std::shared_ptr<Fetch>& op);
 
-    // Reports once, with whatever is now stored under the hash: a poll may have brought the message
-    // in even when the members asked did not have it.
-    void conclude(Fetch& op, FetchResult result) {
+    void conclude(Fetch& op, Outcome outcome) {
         if (op.concluded)
             return;
         op.concluded = true;
 
+        auto result = outcome.result;
         log::info(
                 cat,
-                "Pushed message fetch concluded: {}",
-                result == FetchResult::found       ? "found"
-                : result == FetchResult::not_found ? "not yet on the members asked"
-                : result == FetchResult::failed    ? "no member answered"
-                                                   : "no network");
+                "Fetch of {} concluded: {}",
+                op.hash.empty() ? "namespace {}"_format(static_cast<int16_t>(op.ns))
+                                : "a pushed message"s,
+                result == FetchResult::found        ? "found"
+                : result == FetchResult::unreadable ? "found, but it did not decrypt"
+                : result == FetchResult::not_found  ? "not yet on the members asked"
+                : result == FetchResult::failed     ? "no member answered"
+                                                    : "no network");
+        if (op.done)
+            std::exchange(op.done, nullptr)(std::move(outcome));
+    }
 
-        op.client->message_by_hash(op.hash, [result, cb = std::move(op.cb)](auto stored) mutable {
-            if (!cb)
-                return;
-            if (!stored)
-                return cb(Expected<FetchedMessage>{unexpected{stored.error()}});
-            cb(Expected<FetchedMessage>{FetchedMessage{result, std::move(*stored)}});
-        });
+    void conclude(Fetch& op, FetchResult result) {
+        conclude(op, Outcome{result});
     }
 
     void start_round(const std::shared_ptr<Fetch>& op) {
@@ -131,18 +142,34 @@ namespace {
         // Received whether or not the fetch has already concluded: it came from our own swarm, and
         // dropping it would only leave the next poll to fetch it again.  The cursor is recorded
         // because this is an ordinary retrieve from it; see the TODO on fetch_message.
+        core::ReceiveResult received;
         {
             auto configs_held = core.configs.batch();
-            core.receive_messages(got->messages, op->ns, !got->more);
+            received = core.receive_messages(got->messages, op->ns, !got->more);
         }
         CoreAccess::record_cursor(core, res.node.remote_pubkey, op->ns, got->messages);
 
         if (op->concluded)
             return;
 
-        if (std::ranges::any_of(
-                    got->messages, [&](const core::SwarmMessage& m) { return m.hash == op->hash; }))
-            return conclude(*op, FetchResult::found);
+        // Bringing a namespace up to date ends once one member has handed over all it holds.
+        if (op->hash.empty()) {
+            if (!got->more)
+                return conclude(*op, FetchResult::found);
+        } else if (auto it = std::ranges::find(got->messages, op->hash, &core::SwarmMessage::hash);
+                   it != got->messages.end()) {
+            auto failed = std::ranges::find(
+                    received.undecryptable,
+                    op->hash,
+                    &std::pair<std::string, core::MessageDecryptFailure>::first);
+            if (failed == received.undecryptable.end())
+                return conclude(*op, FetchResult::found);
+            return conclude(
+                    *op,
+                    Outcome{FetchResult::unreadable,
+                            {it->data.begin(), it->data.end()},
+                            failed->second});
+        }
 
         // Not yet, but this member says it holds more past what it returned, so the message may
         // still be among it.  The continuation goes back to the same member, whose cursor it
@@ -178,6 +205,102 @@ namespace {
         }
 
         conclude(*op, op->answered ? FetchResult::not_found : FetchResult::failed);
+    }
+
+    std::shared_ptr<Fetch> start_fetch(
+            core::Core& core,
+            config::Namespace ns,
+            std::string hash,
+            std::chrono::steady_clock::time_point deadline,
+            std::function<void(Outcome)> done) {
+        auto op = std::make_shared<Fetch>();
+        op->core = &core;
+        op->ns = ns;
+        op->hash = std::move(hash);
+        op->done = std::move(done);
+        op->deadline = deadline;
+
+        if (!core.network() || !core.globals.have_account()) {
+            conclude(*op, FetchResult::no_network);
+            return op;
+        }
+
+        auto remaining = std::max<std::chrono::milliseconds>(
+                0ms,
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                        deadline - std::chrono::steady_clock::now()));
+        core.call_later(remaining, [op] {
+            conclude(*op, op->answered ? FetchResult::not_found : FetchResult::failed);
+        });
+        core.call([op] { start_round(op); });
+        return op;
+    }
+
+    // Hands `cb` what is stored under the push's hash once handling ends with `outcome`.
+    void report_stored(
+            client::Client& client, Payload p, Handled outcome, result_function<HandledPush> cb) {
+        auto hash = p.hash;
+        client.message_by_hash(
+                std::move(hash),
+                [p = std::move(p), outcome, cb = std::move(cb)](auto stored) mutable {
+                    if (!stored)
+                        return cb(Expected<HandledPush>{unexpected{stored.error()}});
+                    cb(Expected<HandledPush>{
+                            HandledPush{outcome, std::move(p), std::move(*stored)}});
+                });
+    }
+
+    // A message that arrived but did not decrypt.  For want of a key, which is what a key rotation
+    // we have not yet heard about looks like, the device group is fetched -- that is where a
+    // rotation's new keys arrive -- and the message tried again; it is unreadable if it still
+    // fails, or failed for any other reason.  `delivered` is what to report if the retry reads it.
+    void retry_unreadable(
+            core::Core& core,
+            client::Client& client,
+            Payload p,
+            std::vector<std::byte> data,
+            core::MessageDecryptFailure why,
+            std::chrono::steady_clock::time_point deadline,
+            Handled delivered,
+            result_function<HandledPush> cb) {
+        auto unreadable = [&client](Payload p, result_function<HandledPush> cb) {
+            ClientAccess::report(
+                    client,
+                    cb,
+                    Expected<HandledPush>{
+                            HandledPush{Handled::unreadable, std::move(p), std::nullopt}});
+        };
+
+        if (why != core::MessageDecryptFailure::no_pfs_key ||
+            std::chrono::steady_clock::now() + MIN_ROUND_BUDGET >= deadline)
+            return unreadable(std::move(p), std::move(cb));
+
+        log::info(cat, "A pushed message needs keys we lack; fetching the device group");
+        start_fetch(
+                core,
+                config::Namespace::Devices,
+                "",
+                deadline,
+                [&core,
+                 &client,
+                 unreadable,
+                 p = std::move(p),
+                 data = std::move(data),
+                 delivered,
+                 cb = std::move(cb)](Outcome) mutable {
+                    core.call([&core,
+                               &client,
+                               unreadable,
+                               p = std::move(p),
+                               data = std::move(data),
+                               delivered,
+                               cb = std::move(cb)]() mutable {
+                        core::SwarmMessage m{data, p.hash, p.timestamp, p.expiry};
+                        if (!core.receive_messages({&m, 1}, p.ns, true).undecryptable.empty())
+                            return unreadable(std::move(p), std::move(cb));
+                        report_stored(client, std::move(p), delivered, std::move(cb));
+                    });
+                });
     }
 
 }  // namespace
@@ -239,21 +362,30 @@ void Notifications::handle(
     if (!core->globals.have_account() || p.swarm != core->globals.session_id_hex())
         return report(std::move(cb), Handled::not_ours, std::move(p));
 
+    auto until = std::chrono::steady_clock::now() + deadline;
+
     if (p.data) {
-        core->call([core, client, p = std::move(p), cb = std::move(cb)]() mutable {
+        core->call([core, client, until, p = std::move(p), cb = std::move(cb)]() mutable {
             core::SwarmMessage m{*p.data, p.hash, p.timestamp, p.expiry};
+            core::ReceiveResult received;
             {
                 auto configs_held = core->configs.batch();
-                core->receive_messages({&m, 1}, p.ns, true);
+                received = core->receive_messages({&m, 1}, p.ns, true);
             }
-            auto hash = p.hash;
-            client->message_by_hash(
-                    std::move(hash), [p = std::move(p), cb = std::move(cb)](auto stored) mutable {
-                        if (!stored)
-                            return cb(Expected<HandledPush>{unexpected{stored.error()}});
-                        cb(Expected<HandledPush>{
-                                HandledPush{Handled::received, std::move(p), std::move(*stored)}});
-                    });
+            if (!received.undecryptable.empty()) {
+                auto data = std::move(*p.data);
+                auto why = received.undecryptable.front().second;
+                return retry_unreadable(
+                        *core,
+                        *client,
+                        std::move(p),
+                        std::move(data),
+                        why,
+                        until,
+                        Handled::received,
+                        std::move(cb));
+            }
+            report_stored(*client, std::move(p), Handled::received, std::move(cb));
         });
         return;
     }
@@ -263,18 +395,36 @@ void Notifications::handle(
 
     auto ns = p.ns;
     auto hash = p.hash;
-    fetch_message(
+    start_fetch(
+            *core,
             ns,
             std::move(hash),
-            deadline,
-            [p = std::move(p), cb = std::move(cb)](Expected<FetchedMessage> fetched) mutable {
-                if (!fetched)
-                    return cb(Expected<HandledPush>{unexpected{fetched.error()}});
-                auto outcome = fetched->result == FetchResult::found     ? Handled::fetched
-                             : fetched->result == FetchResult::not_found ? Handled::not_found
-                                                                         : Handled::fetch_failed;
-                cb(Expected<HandledPush>{
-                        HandledPush{outcome, std::move(p), std::move(fetched->message)}});
+            until,
+            [core, client, until, report, p = std::move(p), cb = std::move(cb)](
+                    Outcome fetched) mutable {
+                switch (fetched.result) {
+                    case FetchResult::found:
+                        return report_stored(
+                                *client, std::move(p), Handled::fetched, std::move(cb));
+                    case FetchResult::unreadable:
+                        return retry_unreadable(
+                                *core,
+                                *client,
+                                std::move(p),
+                                std::move(fetched.undecrypted),
+                                *fetched.why,
+                                until,
+                                Handled::fetched,
+                                std::move(cb));
+                    // A poll may have brought it in regardless, so look.
+                    case FetchResult::not_found:
+                        return report_stored(
+                                *client, std::move(p), Handled::not_found, std::move(cb));
+                    case FetchResult::failed:
+                    case FetchResult::no_network:
+                        return report_stored(
+                                *client, std::move(p), Handled::fetch_failed, std::move(cb));
+                }
             });
 }
 
@@ -283,22 +433,25 @@ void Notifications::fetch_message(
         std::string hash,
         std::chrono::milliseconds deadline,
         result_function<FetchedMessage> cb) {
-    auto& core = _client.core;
-    auto op = std::make_shared<Fetch>();
-    op->core = &core;
-    op->client = &_client;
-    op->ns = ns;
-    op->hash = std::move(hash);
-    op->cb = std::move(cb);
-    op->deadline = std::chrono::steady_clock::now() + deadline;
-
-    if (!core.network() || !core.globals.have_account())
-        return conclude(*op, FetchResult::no_network);
-
-    core.call_later(deadline, [op] {
-        conclude(*op, op->answered ? FetchResult::not_found : FetchResult::failed);
-    });
-    core.call([op] { start_round(op); });
+    // Reports whatever is then stored under the hash: a poll may have brought the message in even
+    // when the members asked did not have it.
+    auto* client = &_client;
+    start_fetch(
+            _client.core,
+            ns,
+            hash,
+            std::chrono::steady_clock::now() + deadline,
+            [client, hash, cb = std::move(cb)](Outcome outcome) mutable {
+                client->message_by_hash(
+                        hash, [result = outcome.result, cb = std::move(cb)](auto stored) mutable {
+                            if (!cb)
+                                return;
+                            if (!stored)
+                                return cb(Expected<FetchedMessage>{unexpected{stored.error()}});
+                            cb(Expected<FetchedMessage>{
+                                    FetchedMessage{result, std::move(*stored)}});
+                        });
+            });
 }
 
 }  // namespace session::push

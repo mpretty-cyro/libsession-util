@@ -522,8 +522,9 @@ class Core {
     // Feeds one pushed message in as though it had been retrieved.
     void _handle_server_push(std::string_view endpoint, std::span<const std::byte> body);
 
-    // Decrypts and dispatches one-to-one messages from Namespace::Default.
-    void _handle_direct_messages(std::span<const SwarmMessage> messages);
+    // Decrypts and dispatches one-to-one messages from Namespace::Default, returning those that
+    // did not decrypt.
+    ReceiveResult _handle_direct_messages(std::span<const SwarmMessage> messages);
 
     // Handles a PFS fetch response
     void _handle_pfs_response(std::span<const std::byte, 33> sid, std::string body);
@@ -934,7 +935,10 @@ class Core {
     // retrieval), and false if more messages may follow.  Note that if there turn out to be no more
     // messages after a non-final call, the caller should still call this with an empty span and
     // is_final=true to flush any actions that are deferred until the end of a fetch.
-    void receive_messages(
+    //
+    // Returns the one-to-one messages that did not decrypt; see ReceiveResult.  Every caller but
+    // one that must act on a failure immediately can ignore it.
+    ReceiveResult receive_messages(
             std::span<const SwarmMessage> messages, config::Namespace ns, bool is_final);
 
   private:

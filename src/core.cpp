@@ -1861,9 +1861,8 @@ int64_t Core::send_dm(
             force_v2);
 }
 
-void Core::_handle_direct_messages(std::span<const SwarmMessage> messages) {
-    if (!callbacks.message_received && !callbacks.message_decrypt_failed)
-        return;
+ReceiveResult Core::_handle_direct_messages(std::span<const SwarmMessage> messages) {
+    ReceiveResult result;
 
     auto seed = globals.account_seed();
     auto session_id = globals.session_id();
@@ -1885,6 +1884,7 @@ void Core::_handle_direct_messages(std::span<const SwarmMessage> messages) {
     };
 
     auto fire_fail = [&](const SwarmMessage& msg, MessageDecryptFailure reason) {
+        result.undecryptable.emplace_back(msg.hash, reason);
         if (!callbacks.message_decrypt_failed)
             return;
         try {
@@ -1994,13 +1994,14 @@ void Core::_handle_direct_messages(std::span<const SwarmMessage> messages) {
             }
         }
     }
+    return result;
 }
 
-void Core::receive_messages(
+ReceiveResult Core::receive_messages(
         std::span<const SwarmMessage> messages, config::Namespace ns, bool is_final) {
     using config::Namespace;
     switch (ns) {
-        case Namespace::Default: _handle_direct_messages(messages); break;
+        case Namespace::Default: return _handle_direct_messages(messages);
         case Namespace::Devices: devices.parse_device_messages(messages, is_final); break;
         case Namespace::AccountPubkeys: devices.parse_account_pubkeys(messages, is_final); break;
         case Namespace::UserProfile:
@@ -2013,6 +2014,7 @@ void Core::receive_messages(
                     "receive_messages: ignoring unhandled namespace {}",
                     static_cast<int16_t>(ns));
     }
+    return {};
 }
 
 void Core::apply_migrations() {

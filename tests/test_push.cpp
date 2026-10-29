@@ -90,6 +90,16 @@ struct Setup {
         TestHelper::drain(c->core);
     }
 
+    /// A member's answer holding real messages to us under `hashes`, which decrypt.
+    std::string dms(std::vector<std::string> hashes, bool more = false) {
+        static SenderKeys sender;
+        std::vector<std::pair<std::vector<std::byte>, std::string>> messages;
+        for (auto& h : hashes)
+            messages.emplace_back(
+                    encode_incoming_dm(*c, sender, "message " + h, clock_now_ms()), std::move(h));
+        return answer_with(std::move(messages), more);
+    }
+
     void reply_error(MockNetwork::SentRequest& to) {
         to.callback(false, false, 500, {}, "nope");
         TestHelper::drain(c->core);
@@ -129,11 +139,11 @@ TEST_CASE("Push fetch: the first member holding it ends the fetch", "[push_notif
     s.reply(sent[0], answer({}));
     CHECK(s.results.empty());
 
-    s.reply(sent[1], answer({"h-before", "h-target"}));
+    s.reply(sent[1], s.dms({"h-before", "h-target"}));
     CHECK(s.outcomes() == std::vector{FetchResult::found});
 
     // A late answer is still taken in, and changes nothing about the result.
-    s.reply(sent[2], answer({"h-target"}));
+    s.reply(sent[2], s.dms({"h-target"}));
     CHECK(s.results.size() == 1);
 
     // The member that had it is where the next retrieve of the namespace resumes.
@@ -157,7 +167,7 @@ TEST_CASE("Push fetch: asks again once when no member has it yet", "[push_notifi
     SECTION("and finds it") {
         auto again = take_retrieves(*s.net);
         REQUIRE(again.size() == 3);
-        s.reply(again[2], answer({"h-target"}));
+        s.reply(again[2], s.dms({"h-target"}));
         CHECK(s.outcomes() == std::vector{FetchResult::found});
     }
 
@@ -221,7 +231,7 @@ TEST_CASE(
     CHECK(member_of(next[0]) == member_of(sent[0]));
     CHECK(retrieve_params(next[0])["last_hash"] == "h-2");
 
-    s.reply(next[0], answer({"h-target"}));
+    s.reply(next[0], s.dms({"h-target"}));
     CHECK(s.outcomes() == std::vector{FetchResult::found});
 }
 
@@ -1004,4 +1014,67 @@ TEST_CASE(
     // Once each, and still claimed: never shown again.
     CHECK(d.notifications.stale().empty());
     CHECK_FALSE(d.decide(a));
+}
+
+// ── A message that arrives but will not decrypt ─────────────────────────────────────────────────
+
+namespace {
+
+/// A v2 message to `to` that no key of theirs opens: encrypted for another account's keys, so the
+/// key indicator matches nothing and the non-PFS fallback fails too -- which is how a message under
+/// keys from a rotation not yet heard about looks.
+std::vector<std::byte> for_unknown_keys(const SenderKeys& from) {
+    TempCore other;
+    other->devices.active_account_keys();
+    auto [x25519, mlkem] = TestHelper::active_account_pubkeys(*other);
+    b33 other_sid;
+    std::ranges::copy(other->globals.session_id(), other_sid.begin());
+    return encrypt_for_recipient_v2(from.ed_sk, other_sid, x25519, mlkem, "01"_hex_b, std::nullopt);
+}
+
+}  // namespace
+
+TEST_CASE(
+        "Push handle: a message under keys we lack fetches the device group first",
+        "[push_notifications]") {
+    Extension x;
+    SenderKeys sender;
+    x.handle(x.push_for(0, for_unknown_keys(sender)));
+
+    // The device group is where a rotation's new keys arrive, so it is fetched before giving up.
+    CHECK(x.handled.empty());
+    auto sent = take_retrieves(*x.net);
+    REQUIRE(sent.size() == 1);
+    CHECK(retrieve_params(sent[0])["namespace"] == 21);
+    x.reply(sent[0], answer({}));
+
+    // Still no key that opens it.
+    auto h = x.only();
+    CHECK(h.outcome == push::Handled::unreadable);
+    CHECK_FALSE(h.message);
+
+    auto n = x.notifications.decide(h);
+    REQUIRE(n);
+    CHECK(n->kind == push::NotificationContent::Kind::generic);
+}
+
+TEST_CASE(
+        "Push handle: a message that is simply broken is unreadable at once",
+        "[push_notifications]") {
+    Extension x;
+
+    SECTION("carried by the push") {
+        x.handle(x.push_for(0, to_vector<std::byte>("not a message"sv)));
+        CHECK(x.only().outcome == push::Handled::unreadable);
+        CHECK(take_retrieves(*x.net).empty());
+    }
+
+    SECTION("fetched") {
+        x.handle(x.push_for(0, std::nullopt, {{"l", 4000}, {"B", true}}));
+        auto sent = take_retrieves(*x.net);
+        REQUIRE(sent.size() == 1);
+        x.reply(sent[0], answer({"h-pushed"}));
+        CHECK(x.only().outcome == push::Handled::unreadable);
+        CHECK(take_retrieves(*x.net).empty());
+    }
 }

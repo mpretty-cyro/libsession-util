@@ -110,6 +110,12 @@ std::optional<NotificationContent> Notifications::decide(
         case Handled::undecryptable:
         case Handled::malformed: return generic();
 
+        // A one-to-one message we know exists and could not read.
+        case Handled::unreadable:
+            if (handled.payload && handled.payload->ns == config::Namespace::Default)
+                return generic();
+            return std::nullopt;
+
         case Handled::not_found:
         case Handled::fetch_failed:
             // A poll may have brought it in regardless.
