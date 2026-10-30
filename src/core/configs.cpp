@@ -320,6 +320,7 @@ void Configs::_schedule_push() {
         return;
     _push_scheduled = true;
     _arm_push_timer(push_debounce);
+    _report_push_pending();
 }
 
 void Configs::_arm_push_timer(std::chrono::milliseconds delay) {
@@ -355,9 +356,31 @@ void Configs::push_now() {
     // _load(), so this is the one path that could otherwise skip the check entirely.
     assert(on_loop());
 
-    if (_push_in_flight)
+    if (!_push_in_flight)
+        _send_push();
+
+    // Here rather than in `_send_push`, which has several ways of not sending: a scheduled push
+    // that reaches this and cannot go has stopped being pending, and that is reported here too.
+    _report_push_pending();
+}
+
+void Configs::_report_push_pending() {
+    auto pending = push_pending();
+    if (pending == _push_pending_reported)
         return;
-    _send_push();
+    _push_pending_reported = pending;
+
+    // Tracked but not fired during construction, when nothing can be listening: whoever reads
+    // push_pending() afterwards starts from the same value the next report is a change from.
+    if (!core._constructed)
+        return;
+    if (auto& f = cb().config_push_changed) {
+        try {
+            f(pending);
+        } catch (const std::exception& e) {
+            log::warning(cat, "config_push_changed callback threw: {}", e.what());
+        }
+    }
 }
 
 void Configs::_send_push() {
@@ -472,6 +495,13 @@ void Configs::_handle_push_response(
     assert(on_loop());
 
     _push_in_flight = false;
+
+    // Every way out of here has finished with the push: answered, failed, or rescheduled because
+    // something changed while it was out.
+    struct report_on_exit {
+        Configs& c;
+        ~report_on_exit() { c._report_push_pending(); }
+    } report{*this};
 
     if (!success || !resp) {
         log::warning(
