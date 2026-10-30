@@ -479,6 +479,17 @@ struct Subscriber {
         TestHelper::drain(c->core);
     }
 
+    // The request never reached the push server: no tunnel, a bad path, a timeout.
+    void unreachable(MockNetwork::SentRequest& r) {
+        r.callback(false, true, 0, {}, std::nullopt);
+        TestHelper::drain(c->core);
+    }
+
+    void wait_past_retry() {
+        std::this_thread::sleep_for(Notifications::SUBSCRIBE_RETRY_DELAY + 300ms);
+        TestHelper::drain(c->core);
+    }
+
     /// Subscribes with `token` and accepts it.
     void subscribed(std::string token) {
         subscribe(std::move(token));
@@ -588,9 +599,15 @@ TEST_CASE(
         CHECK(s.results[0].error().code == push::err::rejected);
     }
 
-    SECTION("not reached") {
-        sent[0].callback(false, true, 0, {}, std::nullopt);
-        TestHelper::drain(s.c->core);
+    SECTION("not reached, every time") {
+        s.unreachable(sent[0]);
+        for (int i = 1; i < Notifications::SUBSCRIBE_ATTEMPTS; i++) {
+            CHECK(s.results.empty());
+            s.wait_past_retry();
+            auto again = take_sent_to(*s.net, "subscribe");
+            REQUIRE(again.size() == 1);
+            s.unreachable(again[0]);
+        }
         REQUIRE(s.results.size() == 1);
         REQUIRE_FALSE(s.results[0].has_value());
         CHECK(s.results[0].error().code == push::err::request_failed);
@@ -599,6 +616,39 @@ TEST_CASE(
     // Nothing was recorded, so the next attempt sends again.
     s.subscribe("token-1");
     CHECK(take_sent_to(*s.net, "subscribe").size() == 1);
+}
+
+TEST_CASE(
+        "Push subscribe: a request that does not reach the push server is sent again",
+        "[push_notifications]") {
+    Subscriber s;
+    s.subscribe("token-1");
+    auto sent = take_sent_to(*s.net, "subscribe");
+    REQUIRE(sent.size() == 1);
+    s.unreachable(sent[0]);
+
+    // Not straight away: a network that has only just started needs a moment.
+    CHECK(take_sent_to(*s.net, "subscribe").empty());
+    s.wait_past_retry();
+    auto again = take_sent_to(*s.net, "subscribe");
+    REQUIRE(again.size() == 1);
+    CHECK(body_of(again[0]) == body_of(sent[0]));
+
+    s.reply(again[0], R"([{"success": true, "added": true}])");
+    REQUIRE(s.results.size() == 1);
+    REQUIRE(s.results[0].has_value());
+    CHECK(*s.results[0] == push::SubscribeResult::subscribed);
+}
+
+TEST_CASE("Push subscribe: a refusal is not sent again", "[push_notifications]") {
+    Subscriber s;
+    s.subscribe("token-1");
+    auto sent = take_sent_to(*s.net, "subscribe");
+    REQUIRE(sent.size() == 1);
+    s.reply(sent[0], R"([{"error": 3, "message": "invalid signature"}])");
+    REQUIRE(s.results.size() == 1);
+    s.wait_past_retry();
+    CHECK(take_sent_to(*s.net, "subscribe").empty());
 }
 
 TEST_CASE("Push subscribe: each service by the push server's name for it", "[push_notifications]") {

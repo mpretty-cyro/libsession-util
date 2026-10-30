@@ -163,33 +163,70 @@ namespace {
     }
 
     // Sends `requests` and hands `done` either nothing (all accepted) or the error, on Core's
-    // loop.
+    // loop.  A request that fails before the push server answers is sent again, up to
+    // SUBSCRIBE_ATTEMPTS in all.
     void send(
             core::Core& core,
             const Server& server,
             std::string_view endpoint,
             nlohmann::json requests,
-            std::function<void(std::optional<Error>)> done) {
+            std::function<void(std::optional<Error>)> done,
+            int attempt = 1) {
         auto* net = core.network();
+        if (!net)
+            return done(Error{client::err::network_unavailable, "no network"});
         auto expected = requests.size();
+        auto request = server_request(server, endpoint, requests);
         net->send_request(
-                server_request(server, endpoint, requests),
-                [&core, expected, done = std::move(done)](
+                std::move(request),
+                [&core,
+                 server,
+                 endpoint = std::string{endpoint},
+                 requests = std::move(requests),
+                 attempt,
+                 expected,
+                 done = std::move(done)](
                         bool success,
                         bool timeout,
                         int16_t status,
                         std::vector<std::pair<std::string, std::string>> /*headers*/,
                         std::optional<std::string> body) mutable {
-                    core.call([expected,
+                    core.call([&core,
+                               server = std::move(server),
+                               endpoint = std::move(endpoint),
+                               requests = std::move(requests),
+                               attempt,
+                               expected,
                                done = std::move(done),
                                success,
                                timeout,
                                status,
-                               body = std::move(body)] {
-                        if (!success || !body)
-                            return done(
-                                    Error{err::request_failed,
-                                          timeout ? "timed out" : "status {}"_format(status)});
+                               body = std::move(body)]() mutable {
+                        if (!success || !body) {
+                            auto why = timeout ? "timed out"s : "status {}"_format(status);
+                            if (attempt >= Notifications::SUBSCRIBE_ATTEMPTS)
+                                return done(Error{err::request_failed, std::move(why)});
+                            log::info(
+                                    cat,
+                                    "push server {} request failed ({}); trying again",
+                                    endpoint,
+                                    why);
+                            return core.call_later(
+                                    Notifications::SUBSCRIBE_RETRY_DELAY,
+                                    [&core,
+                                     server = std::move(server),
+                                     endpoint = std::move(endpoint),
+                                     requests = std::move(requests),
+                                     attempt,
+                                     done = std::move(done)]() mutable {
+                                        send(core,
+                                             server,
+                                             endpoint,
+                                             std::move(requests),
+                                             std::move(done),
+                                             attempt + 1);
+                                    });
+                        }
                         try {
                             if (auto refusal = first_refusal(*body, expected))
                                 return done(Error{err::rejected, std::move(*refusal)});

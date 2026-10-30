@@ -213,6 +213,14 @@ class Notifications {
     /// keeps people who rarely open it subscribed.
     static constexpr auto RENEW_AFTER = 24h;
 
+    /// How many times a subscription request is sent before `subscribe` or `unsubscribe` reports
+    /// it failed, and the wait between tries.  Only a request that did not reach the push server,
+    /// or came back without an answer from it, is sent again: a first request on a network that has
+    /// only just started often fails that way (a path or tunnel not yet usable), and the next one
+    /// gets through.  A refusal is never retried.
+    static constexpr int SUBSCRIBE_ATTEMPTS = 3;
+    static constexpr auto SUBSCRIBE_RETRY_DELAY = 3s;
+
     /// Must not outlive `client`.
     explicit Notifications(client::Client& client, Server server = {}) :
             _client{client}, _server{std::move(server)} {}
