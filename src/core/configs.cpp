@@ -451,74 +451,15 @@ void Configs::_send_push() {
             "sequence",
             [body = std::move(body)](const network::service_node&) { return body; },
             [this, alive = std::weak_ptr<int>{_alive}, pending = std::move(pending)](
-                    Core::SwarmResponse res) {
+                    Core::SwarmResponse res) mutable {
                 if (alive.expired())
                     return;
-                _push_in_flight = false;
-
-                if (!res.ok() || !res.body) {
-                    log::warning(
-                            cat,
-                            "Config push failed ({}): {}",
-                            res.timeout ? "timed out" : "status {}"_format(res.status_code),
-                            res.body.value_or("no response body"));
-                    return;
-                }
-
-                // A config is confirmed only if *every* message it split into was stored.
-                // Confirming a partial push would drop the parts that did land from the obsolete
-                // list while leaving the config believing it is clean, so the missing part would
-                // never be sent again.
-                try {
-                    auto json = nlohmann::json::parse(*res.body);
-                    auto results = json.find("results");
-                    if (results == json.end() || !results->is_array()) {
-                        log::warning(cat, "Config push response carried no results");
-                        return;
-                    }
-
-                    for (const auto& p : pending) {
-                        std::unordered_set<std::string> hashes;
-                        bool stored = true;
-                        for (size_t i = p.first; stored && i < p.first + p.count; i++) {
-                            if (i >= results->size()) {
-                                stored = false;
-                                break;
-                            }
-                            const auto& r = (*results)[i];
-                            auto code = r.find("code");
-                            auto b = r.find("body");
-                            if (code == r.end() || code->get<int>() != 200 || b == r.end()) {
-                                stored = false;
-                                break;
-                            }
-                            auto h = b->find("hash");
-                            if (h == b->end() || !h->is_string()) {
-                                stored = false;
-                                break;
-                            }
-                            hashes.insert(h->get<std::string>());
-                        }
-
-                        if (!stored) {
-                            log::warning(
-                                    cat,
-                                    "Config push: {} was not stored, leaving it dirty",
-                                    p.conf->encryption_domain());
-                            continue;
-                        }
-                        p.conf->confirm_pushed(p.seqno, std::move(hashes));
-                    }
-                } catch (const std::exception& e) {
-                    log::warning(cat, "Could not read config push response: {}", e.what());
-                    return;
-                }
-
-                // Confirming changes the configs' state, and a change that arrived while this was
-                // in flight has re-dirtied them.
-                store_dumps();
-                if (needs_push())
-                    _schedule_push();
+                _handle_push_response(
+                        std::move(pending),
+                        res.ok(),
+                        res.timeout,
+                        res.status_code,
+                        std::move(res.body));
             });
 }
 
