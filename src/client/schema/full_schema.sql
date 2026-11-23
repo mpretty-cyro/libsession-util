@@ -537,3 +537,17 @@ CREATE INDEX message_attachments_sending_thumbnail ON message_attachments(messag
 -- What a restart queues again, and what a setting change checks: the few rows still owed.
 CREATE INDEX message_attachments_auto_pending ON message_attachments(message)
     WHERE auto_pending IS NOT NULL;
+
+-- The messages a notification has been posted for, by whichever process sharing this database
+-- posted it: the claim that keeps an application and its notification extension from both posting
+-- one for the same message, whichever of them received it first.  push::Notifications::claim reads
+-- and writes it; it lives in Client's schema because push has none of its own.  A row goes with its
+-- message, or sooner: push prunes rows that can no longer matter, keeping each conversation's
+-- newest.
+CREATE TABLE notified (
+    message INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    at INTEGER NOT NULL,                -- ms since epoch
+    -- When it was reported for taking down, its message having been read or deleted; ms since
+    -- epoch.  Only ever set on a row about to be pruned or kept as its conversation's newest.
+    removed INTEGER
+) STRICT;
