@@ -73,3 +73,18 @@ cdb9c308  attachments, mid-branch
 a80b2fcb  attachments, mid-branch
 0161f39a  attachments, mid-branch
 1e3f051b  attachments, mid-branch
+
+# The push branch (session-foundation/libsession#209): its commits that numbered the notified
+# migration 008, before it was renumbered 010.
+dcbd2ca5  notified migration numbered 008, mid-branch
+c85d4231  notified migration numbered 008, mid-branch
+c99cc160  notified migration numbered 008, mid-branch
+cc0bec9f  notified migration numbered 008, mid-branch
+c33d6eb6  notified migration numbered 008, mid-branch
+569732ff  notified migration numbered 008, mid-branch
+8815ffce  notified migration numbered 008, mid-branch
+88e68943  notified migration numbered 008, mid-branch
+0de1209f  notified migration numbered 008, mid-branch
+f9a66992  notified migration numbered 008, mid-branch
+9d6a1d5a  notified migration numbered 008, mid-branch
+2329239d  notified migration numbered 008, mid-branch
