@@ -237,8 +237,9 @@ void Core::set_network(std::unique_ptr<network::Network> network) {
 
     // The timer's first poll is a whole interval away, and until a poll the account sees nothing
     // new and holds no subscription; so poll now as well.  Queued rather than run here, on the
-    // caller's thread.  Requests sent before the network is ready wait for it.
-    if (_network && _poll_on_attach)
+    // caller's thread.  Requests sent before the network is ready wait for it.  Not for a one-shot
+    // Core, which attaches to do the one job it was made for and starts no polling of its own.
+    if (_network && _poll_on_attach && !_one_shot)
         _jq.call_soon([this] { _poll(); });
 }
 

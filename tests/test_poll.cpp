@@ -241,6 +241,20 @@ TEST_CASE("Poll: a one-shot Core never starts polling", "[core][poll]") {
     }));
 }
 
+TEST_CASE("Poll: attaching a network to a one-shot Core starts no poll", "[core][poll]") {
+    TempCore core{core::one_shot{}};
+    // Attached by hand, not through attach_mock_network, which turns the poll on attach off.
+    auto net = std::make_unique<MockNetwork>();
+    auto* mock_net = net.get();
+    mock_net->core = &*core;
+    core->set_network(std::move(net));
+    TestHelper::drain(*core);
+
+    CHECK(std::ranges::none_of(mock_net->sent_requests, [](const MockNetwork::SentRequest& r) {
+        return r.request.endpoint == "batch";
+    }));
+}
+
 TEST_CASE(
         "Poll: nothing is polled while receiving is paused, and resuming polls at once",
         "[core][poll]") {
